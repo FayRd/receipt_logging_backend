@@ -1,5 +1,6 @@
-import re
-from src.Models.schemas import ReceiptExtraction, LineItem, ScanRequest
+import re, json
+import google.generativeai as genai
+from src.Models.schemas import Receipt, ScanRequest
 from src.config import get_settings
 
 class ExtractionService:
@@ -41,39 +42,32 @@ class ExtractionService:
     async def _extract_with_gemini(self, request: ScanRequest) -> ReceiptExtraction:
         try:
             # TODO: Refactor with new business logic
-            import google.generativeai as genai
             genai.configure(api_key=self.settings.gemini_api_key)
             model = genai.GenerativeModel('gemini-1.5-flash')
             
-            prompt = f"""Extract structured receipt data from this OCR text. Return JSON only.
+            image_bytes = None  # TODO: Replace with actual image bytes
+            prompt = f"""
+                    Task: Extract data from this receipt image into a JSON object strictly matching the schema requirements.
+                    Instructions:
+                    1. Date: Format the receipt transaction date as an ISO 8601 datetime string (e.g., 2026-03-30T14:30:00Z).
+                    2. Raw Text: Transcribe all visible text from top to bottom into raw_text.
+                    3. Confidence Score: Assign a float from 0.0 to 1.0 reflecting extraction accuracy based on image legibility.
+                    4. Category: Infer a general expense category (e.g., Dining, Groceries, Supplies, Gas).
+                    5. Missing Fields: Set any missing or non-applicable optional fields to null.
+                    6. Output only valid JSON.
+                    """
             
-                        OCR Text:
-                        {request.ocr_text}
-
-                        Return JSON with these fields:
-                        - merchant_name: string or null
-                        - total_amount: number or null  
-                        - subtotal: number or null
-                        - tax_amount: number or null
-                        - currency: string (ISO 4217, default 'USD')
-                        - date: string (YYYY-MM-DD format) or null
-                        - category: one of [Food & Dining, Shopping, Transportation, Entertainment, Healthcare, Utilities, Other] or null
-                        - line_items: array of {{description: string, quantity: number|null, unit_price: number|null, total_price: number|null}}
-                        - confidence_score: number between 0 and 1"""
-            
-            response = model.generate_content(prompt)
-            import json
+            response = model.generate_content(
+                [image_bytes, prompt],
+                generation_config=genai.GenerationConfig(
+                    response_mime_type="application/json",
+                    response_schema=Receipt,
+                ),
+            )
             # Strip markdown code blocks if present
             content = response.text.strip()
-            if content.startswith('```'):
-                content = content.split('```')[1]
-                if content.startswith('json'):
-                    content = content[4:]
             data = json.loads(content.strip())
-            return ReceiptExtraction(
-                **data,
-                raw_ocr_text=request.ocr_text,
-            )
+            return Receipt(data)
         except Exception as e:
             # Fallback to regex
             result = self._extract_with_regex(request)

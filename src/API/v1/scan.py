@@ -12,7 +12,7 @@ async def parse_receipt(
     request: ScanRequest,
     service: ExtractionService = Depends(get_extraction_service)
 ):
-    """Parse OCR text from a scanned receipt and return structured data."""
+    """Parse receipt image and return structured data."""
     try:
         # TODO: Modify this endpoint to input image into gemini model 
         # and get structured output at src/Services/extraction_service

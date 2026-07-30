@@ -9,7 +9,7 @@ class LineItem(BaseModel):
 
 class Receipt(BaseModel):
     merchant_name: str
-    line_items: list[LineItem]
+    line_items: list[LineItem] | None = None
     subtotal: float | None = None
     tax_amount: float | None = None
     total_amount: float

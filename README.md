@@ -1,18 +1,19 @@
 # Receipt Logger Backend
 
-An AI-powered FastAPI backend service for receipt scanning, structured data extraction using **Google Gemini 1.5 Flash Vision AI**, and cloud database synchronization for the **Receipt Logger** mobile application.
+An AI-powered FastAPI backend service for receipt scanning, structured data extraction using **Google Gemini 3.6 Flash Vision AI**, and cloud database synchronization for the **Receipt Logger** mobile application.
 
 ---
 
 ## 🚀 Application Summary
 
-The **Receipt Logger Backend** provides high-speed, intelligent multimodal receipt parsing and data management for the privacy-first mobile client. It accepts receipt image uploads, processes them directly with Gemini Vision AI using strict structured Pydantic schemas, and returns validated JSON containing merchant info, line items, totals, dates, and categories in ~1.5 seconds.
+The **Receipt Logger Backend** provides high-speed, intelligent multimodal receipt parsing and data management for the privacy-first mobile client. It accepts receipt image uploads, processes them directly with Gemini 3.6 Flash Vision AI using strict structured Pydantic schemas, and returns validated JSON containing merchant info, line items, totals, dates, and categories in ~1.5 seconds. It also provides a full set of user-isolated CRUD endpoints for storing and managing receipts in Supabase with UUID string identifiers.
 
 ### Key Technology Stack
 - **Framework**: FastAPI (Python 3.10+) with Uvicorn ASGI server
-- **AI Extraction**: `google-genai` SDK (`gemini-1.5-flash` Multimodal Vision)
-- **Data Validation**: Pydantic v2 schemas (`Receipt`, `LineItem`, `ScanResponse`)
+- **AI Extraction**: `google-genai` SDK (`gemini-3.6-flash` Multimodal Vision)
+- **Data Validation**: Pydantic v2 schemas (`Receipt`, `LineItem`, `ScanResponse`, `ReceiptRecord` with UUID string IDs, `ReceiptCreateRequest`, `ReceiptBatchCreateRequest`)
 - **Cloud Database & Storage**: Supabase (`supabase-py`) for Postgres DB, Storage, and Vector search
+- **Architecture**: Layered Architecture with per-model repository pattern (`src/Models/Receipts/receipt_repository.py`)
 - **Configuration**: Pydantic `BaseSettings` & `python-dotenv`
 
 ---
@@ -22,15 +23,19 @@ The **Receipt Logger Backend** provides high-speed, intelligent multimodal recei
 ### Implemented Features
 - **Multimodal AI Receipt Extraction** (`POST /api/v1/scan/parse`):
   - Accepts multipart/form-data image uploads (`.png`, `.jpg`, `.jpeg`, `.webp`).
-  - Directly feeds image bytes to Gemini 1.5 Flash with strict JSON schema enforcement.
+  - Directly feeds image bytes to Gemini 3.6 Flash with strict JSON schema enforcement.
   - Extracts merchant name, line items, subtotal, tax, total amount, currency, ISO 8601 date, raw OCR text, and category inference.
   - Always returns HTTP 200 with structured `success`, `data`, and `error` payloads (no regex fallback required).
+- **User-Isolated Receipt CRUD Endpoints** (`/api/v1/receipts`):
+  - `GET /api/v1/receipts/user/{user_id}`: Retrieves all non-deleted receipts owned by `user_id`, ordered newest first.
+  - `GET /api/v1/receipts/{receipt_id}?user_id={user_id}`: Retrieves a single receipt by UUID, enforcing user ownership.
+  - `POST /api/v1/receipts/`: Creates a single receipt record associated with the owner's `user_id`.
+  - `POST /api/v1/receipts/batch`: Batch-creates up to 100 receipts in a single Supabase call.
+  - `DELETE /api/v1/receipts/{receipt_id}?user_id={user_id}`: Soft-deletes a receipt by setting `deleted_at` timestamp.
 - **Health Check & Diagnostics** (`GET /api/v1/health`): Returns API operational status and current environment setting.
 - **CORS & Environment Setup**: Configurable CORS middleware supporting cross-origin mobile app calls.
 
 ### Planned Features
-- **Supabase Cloud Sync** (`/api/v1/receipts`): Sync local offline Isar receipts to cloud Postgres database.
-- **Soft Delete Management**: Soft-delete records via `deleted_at` timestamps.
 - **Image Storage Archiving**: Non-blocking background task to archive scanned receipt images in Supabase Storage buckets.
 - **RAG Conversational AI Assistant** (`/api/v1/chat/query`): Retrieval-Augmented Generation over receipt database embeddings (`pgvector`) allowing users to ask natural language questions about spending trends and items.
 
@@ -41,7 +46,7 @@ The **Receipt Logger Backend** provides high-speed, intelligent multimodal recei
 ### Prerequisites
 - Python 3.10 or higher
 - PowerShell (Windows) or Bash (macOS/Linux)
-- A Google Gemini API Key
+- A Google Gemini API Key & Supabase Project Credentials
 
 ---
 
@@ -140,6 +145,7 @@ receipt_logging_backend/
 └── src/                        # Core Application Source Code
     ├── API/v1/                 # Presentation Layer (health, scan, receipts)
     ├── Infrastructure/         # Data providers (database.py)
-    ├── Models/                 # Pydantic DTOs & Schemas (schemas.py)
+    ├── Models/                 # Pydantic DTOs & Schemas
+    │   └── Receipts/           # Model-specific repository package (receipt_repository.py)
     └── Services/               # AI Extraction Service (extraction_service.py)
 ```

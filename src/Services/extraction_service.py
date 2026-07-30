@@ -23,7 +23,7 @@ class ExtractionService:
         self.client = genai.Client(api_key=self.settings.gemini_api_key)
 
     async def extract_from_image(self, context: ScanContext) -> Receipt:
-        """Send a receipt image to Gemini 1.5 Flash Vision and return a structured Receipt.
+        """Send a receipt image to Gemini 3.6 Flash Vision and return a structured Receipt.
 
         Args:
             context: ScanContext containing raw image bytes, MIME type, and client metadata.

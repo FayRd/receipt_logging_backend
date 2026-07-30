@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from datetime import datetime
 
 
@@ -50,6 +50,20 @@ class ReceiptRecord(BaseModel):
     receipt: Receipt
     created_at: datetime
     deleted_at: datetime | None = None
+
+
+class ReceiptCreateRequest(BaseModel):
+    """Request body for creating a single receipt record."""
+    user_id: str
+    device_id: str
+    receipt: Receipt
+
+
+class ReceiptBatchCreateRequest(BaseModel):
+    """Request body for batch-creating up to 100 receipt records in one DB call."""
+    user_id: str
+    device_id: str
+    receipts: list[Receipt] = Field(..., min_length=1, max_length=100)
 
 
 class HealthResponse(BaseModel):

@@ -8,11 +8,13 @@ class ExtractionService:
     
     async def extract_from_ocr(self, request: ScanRequest) -> ReceiptExtraction:
         """Extract structured data from OCR text. Uses AI if key is available, else regex fallback."""
+        # TODO: Modify this to input image into gemini model and get structured output
         if self.settings.gemini_api_key:
             return await self._extract_with_gemini(request)
         return self._extract_with_regex(request)
     
     def _extract_with_regex(self, request: ScanRequest) -> ReceiptExtraction:
+        # TODO: Remove this helper function
         text = request.ocr_text
         # Find total amount - look for patterns like 'Total: $12.34' or 'TOTAL 12.34'
         total_pattern = re.compile(r'(?:total|amount|sum)[:\s]*\$?([\d,]+\.\d{2})', re.IGNORECASE)
@@ -38,25 +40,26 @@ class ExtractionService:
     
     async def _extract_with_gemini(self, request: ScanRequest) -> ReceiptExtraction:
         try:
+            # TODO: Refactor with new business logic
             import google.generativeai as genai
             genai.configure(api_key=self.settings.gemini_api_key)
             model = genai.GenerativeModel('gemini-1.5-flash')
             
             prompt = f"""Extract structured receipt data from this OCR text. Return JSON only.
             
-OCR Text:
-{request.ocr_text}
+                        OCR Text:
+                        {request.ocr_text}
 
-Return JSON with these fields:
-- merchant_name: string or null
-- total_amount: number or null  
-- subtotal: number or null
-- tax_amount: number or null
-- currency: string (ISO 4217, default 'USD')
-- date: string (YYYY-MM-DD format) or null
-- category: one of [Food & Dining, Shopping, Transportation, Entertainment, Healthcare, Utilities, Other] or null
-- line_items: array of {{description: string, quantity: number|null, unit_price: number|null, total_price: number|null}}
-- confidence_score: number between 0 and 1"""
+                        Return JSON with these fields:
+                        - merchant_name: string or null
+                        - total_amount: number or null  
+                        - subtotal: number or null
+                        - tax_amount: number or null
+                        - currency: string (ISO 4217, default 'USD')
+                        - date: string (YYYY-MM-DD format) or null
+                        - category: one of [Food & Dining, Shopping, Transportation, Entertainment, Healthcare, Utilities, Other] or null
+                        - line_items: array of {{description: string, quantity: number|null, unit_price: number|null, total_price: number|null}}
+                        - confidence_score: number between 0 and 1"""
             
             response = model.generate_content(prompt)
             import json

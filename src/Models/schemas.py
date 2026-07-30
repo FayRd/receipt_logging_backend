@@ -1,44 +1,43 @@
 from pydantic import BaseModel
+from datetime import datetime
 
 class LineItem(BaseModel):
     description: str
-    quantity: float | None
-    unit_price: float | None
-    total_price: float | None
+    quantity: float | None = None
+    unit_price: float | None = None
+    total_price: float | None = None
 
-class ReceiptExtraction(BaseModel):
-    merchant_name: str | None
-    total_amount: float | None
-    subtotal: float | None
-    tax_amount: float | None
+class Receipt(BaseModel):
+    merchant_name: str
+    line_items: list[LineItem]
+    subtotal: float | None = None
+    tax_amount: float | None = None
+    total_amount: float
     currency: str = "USD"
-    date: str | None
-    category: str | None
-    line_items: list[LineItem] = []
-    raw_ocr_text: str
+    category: str | None = None
+    date: datetime
+    raw_text: str
     confidence_score: float = 0.0
-    notes: str | None
+    notes: str | None = None
 
 class ScanRequest(BaseModel):
-    ocr_text: str
-    image_url: str | None = None
-    device_id: str | None = None
+    user_id: str | None = None
+    device_id: str
+    image_url: str
 
 class ScanResponse(BaseModel):
     success: bool
-    data: ReceiptExtraction | None
+    data: Receipt | None
     error: str | None
 
 class ReceiptRecord(BaseModel):
-    id: str | None
-    device_id: str | None
-    merchant_name: str | None
-    total_amount: float | None
-    currency: str
-    date: str | None
-    category: str | None
-    created_at: str | None
-
+    id: str
+    user_id : str | None = None
+    device_id: str
+    receipt: Receipt
+    created_at: datetime
+    deleted_at: datetime | None = None
+    
 class HealthResponse(BaseModel):
     status: str
     environment: str

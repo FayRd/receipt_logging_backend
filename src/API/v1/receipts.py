@@ -14,8 +14,9 @@ async def list_receipts(
 ):
     """List all receipts from Supabase."""
     try:
-        response = supabase.table("receipts").select("*").range(offset, offset + limit - 1).execute()
-        return response.data
+        # TODO: Remove this endpoint for production
+        # response = supabase.table("receipts").select("*").range(offset, offset + limit - 1).execute()
+        return # response.data
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -42,7 +43,8 @@ async def delete_receipt(
 ):
     """Delete a receipt by ID."""
     try:
-        supabase.table("receipts").delete().eq("id", receipt_id).execute()
-        return {"success": True}
+        # TODO: Modify this to soft delete
+        # supabase.table("receipts").delete().eq("id", receipt_id).execute()
+        return {"success": False} # {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

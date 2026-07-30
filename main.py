@@ -37,4 +37,4 @@ app.include_router(receipts.router, prefix="/api/v1")
 
 @app.get("/")
 async def root():
-    return {"message": "Receipt Scanner API", "docs": "/docs"}
+    return {"message": "Receipt Logging API", "docs": "/docs"}

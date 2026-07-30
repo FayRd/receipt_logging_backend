@@ -14,6 +14,8 @@ async def parse_receipt(
 ):
     """Parse OCR text from a scanned receipt and return structured data."""
     try:
+        # TODO: Modify this endpoint to input image into gemini model 
+        # and get structured output at src/Services/extraction_service
         extraction = await service.extract_from_ocr(request)
         return ScanResponse(success=True, data=extraction)
     except Exception as e:

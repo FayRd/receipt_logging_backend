@@ -1,6 +1,8 @@
-from supabase import create_client, Client
+from supabase import acreate_client, AsyncClient
 from src.config import get_settings
 
-def get_supabase_client() -> Client:
+
+async def get_supabase_client() -> AsyncClient:
+    """FastAPI async dependency that yields a Supabase AsyncClient per request."""
     settings = get_settings()
-    return create_client(settings.supabase_url, settings.supabase_key)
+    return await acreate_client(settings.supabase_url, settings.supabase_key)

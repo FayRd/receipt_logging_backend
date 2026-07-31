@@ -36,7 +36,6 @@ The **Receipt Logger Backend** provides high-speed, intelligent multimodal recei
 - **CORS & Environment Setup**: Configurable CORS middleware supporting cross-origin mobile app calls.
 
 ### Planned Features
-- **Image Storage Archiving**: Non-blocking background task to archive scanned receipt images in Supabase Storage buckets.
 - **RAG Conversational AI Assistant** (`/api/v1/chat/query`): Retrieval-Augmented Generation over receipt database embeddings (`pgvector`) allowing users to ask natural language questions about spending trends and items.
 
 ---

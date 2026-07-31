@@ -5,7 +5,7 @@ from src.Services.extraction_service import ExtractionService
 router = APIRouter(prefix="/scan", tags=["Scanning"])
 
 
-def get_extraction_service() -> ExtractionService:
+async def get_extraction_service() -> ExtractionService:
     return ExtractionService()
 
 
@@ -18,7 +18,7 @@ async def parse_receipt(
 ) -> ScanResponse:
     """Accept a multipart receipt image upload and return AI-extracted structured data.
 
-    Sends the image directly to Gemini 1.5 Flash Vision API with a strict JSON output
+    Sends the image directly to Gemini 3.6 Flash Vision API with a strict JSON output
     schema. On success, returns the parsed Receipt. On any failure, returns success=False
     with a descriptive error message (HTTP 200 in both cases).
     """

@@ -70,3 +70,81 @@ class HealthResponse(BaseModel):
     status: str
     environment: str
     version: str = "1.0.0"
+
+
+# ── USER SCHEMAS ──────────────────────────────────────────────────────────────
+
+class UserCreateRequest(BaseModel):
+    """Request body for new user registration."""
+    username: str = Field(..., min_length=3, max_length=50)
+    password: str = Field(..., min_length=6)  # Pre-encrypted string from client
+    avatar_image_path: str | None = None
+
+
+class UserLoginRequest(BaseModel):
+    """Request body for user login."""
+    username: str
+    password: str  # Pre-encrypted string from client
+
+
+class UserRecord(BaseModel):
+    """Sanitized user model — password is never included."""
+    id: str
+    username: str
+    avatar_image_path: str | None = None
+    created_at: datetime
+    deleted_at: datetime | None = None
+
+
+class UserLoginResponse(BaseModel):
+    success: bool
+    user: UserRecord
+    message: str
+
+
+# ── CHAT / CONVERSATION SCHEMAS ───────────────────────────────────────────────
+
+class ConversationCreateRequest(BaseModel):
+    """Request body for creating a new conversation."""
+    user_id: str | None = None
+    device_id: str
+    title: str | None = None
+
+
+class ConversationRecord(BaseModel):
+    id: str
+    user_id: str | None = None
+    device_id: str
+    title: str
+    created_at: datetime
+    updated_at: datetime
+    deleted_at: datetime | None = None
+
+
+class ChatMessageRecord(BaseModel):
+    id: str
+    conversation_id: str
+    sender: str  # "user" | "assistant"
+    content: str
+    created_at: datetime
+
+
+class ChatQueryRequest(BaseModel):
+    """Request body for sending a message to the AI."""
+    conversation_id: str
+    user_id: str | None = None
+    device_id: str
+    message: str = Field(..., min_length=1, max_length=2000)
+
+
+class ChatQueryResponse(BaseModel):
+    conversation_id: str
+    user_message: ChatMessageRecord
+    assistant_message: ChatMessageRecord
+
+
+class ChatHistoryResponse(BaseModel):
+    conversation_id: str
+    messages: list[ChatMessageRecord]
+    total_count: int
+    has_more: bool

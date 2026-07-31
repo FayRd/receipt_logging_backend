@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
-from supabase import Client
+from supabase import AsyncClient
 from src.Infrastructure.database import get_supabase_client
 from src.Models.schemas import (
     ReceiptRecord,
@@ -11,7 +11,7 @@ from src.Models.Receipts.receipt_repository import ReceiptRepository
 router = APIRouter(prefix="/receipts", tags=["Receipts"])
 
 
-def get_repo(db: Client = Depends(get_supabase_client)) -> ReceiptRepository:
+async def get_repo(db: AsyncClient = Depends(get_supabase_client)) -> ReceiptRepository:
     return ReceiptRepository(db)
 
 
@@ -22,7 +22,7 @@ async def list_user_receipts(
     repo: ReceiptRepository = Depends(get_repo),
 ):
     """Get all non-deleted receipts owned by user_id, newest first."""
-    data = repo.get_all_by_user(user_id)
+    data = await repo.get_all_by_user(user_id)
     return data
 
 
@@ -34,7 +34,7 @@ async def get_receipt(
     repo: ReceiptRepository = Depends(get_repo),
 ):
     """Get a single receipt by ID. Returns 404 if not found or not owned by user_id."""
-    data = repo.get_by_id(receipt_id, user_id)
+    data = await repo.get_by_id(receipt_id, user_id)
     if not data:
         raise HTTPException(status_code=404, detail="Receipt not found")
     return data
@@ -47,7 +47,7 @@ async def create_receipt(
     repo: ReceiptRepository = Depends(get_repo),
 ):
     """Create a single receipt record associated with the owner's user_id."""
-    data = repo.create(body.user_id, body.device_id, body.receipt)
+    data = await repo.create(body.user_id, body.device_id, body.receipt)
     return data
 
 
@@ -58,7 +58,7 @@ async def create_receipts_batch(
     repo: ReceiptRepository = Depends(get_repo),
 ):
     """Batch-create up to 100 receipts for the same user in a single DB call."""
-    data = repo.create_batch(body.user_id, body.device_id, body.receipts)
+    data = await repo.create_batch(body.user_id, body.device_id, body.receipts)
     return data
 
 
@@ -70,7 +70,7 @@ async def delete_receipt(
     repo: ReceiptRepository = Depends(get_repo),
 ):
     """Soft-delete a receipt by setting deleted_at. Only the owner can delete it."""
-    deleted = repo.soft_delete(receipt_id, user_id)
+    deleted = await repo.soft_delete(receipt_id, user_id)
     if not deleted:
         raise HTTPException(
             status_code=404,

@@ -34,7 +34,8 @@ class ExtractionService:
         Raises:
             Exception: Propagated directly to the caller on any API or parsing failure.
         """
-        response = self.client.models.generate_content(
+        # client.aio is the async namespace of the google-genai 2.x SDK
+        response = await self.client.aio.models.generate_content(
             model="gemini-3.6-flash",
             contents=[
                 types.Part.from_bytes(

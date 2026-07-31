@@ -28,6 +28,7 @@ httptools==0.8.0
 httpx==0.28.1
 hyperframe==6.1.0
 idna==3.18
+iniconfig==2.3.0
 itsdangerous==2.2.0
 Jinja2==3.1.6
 markdown-it-py==4.2.0
@@ -35,6 +36,7 @@ MarkupSafe==3.0.3
 mdurl==0.1.2
 multidict==6.7.1
 packaging==26.2
+pluggy==1.6.0
 postgrest==2.31.0
 propcache==0.5.2
 pyasn1==0.6.4
@@ -46,6 +48,7 @@ pydantic-settings==2.14.2
 pydantic_core==2.46.4
 Pygments==2.20.0
 PyJWT==2.13.0
+pytest==9.1.1
 python-dotenv==1.2.2
 python-multipart==0.0.32
 PyYAML==6.0.3

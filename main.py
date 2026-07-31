@@ -5,7 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 from src.config import get_settings
-from src.API.v1 import health, scan, receipts, user, devices
+from src.API.v1 import health, scan, receipts, user, devices, chat
 
 
 @asynccontextmanager
@@ -85,6 +85,7 @@ app.include_router(scan.router, prefix="/api/v1")
 app.include_router(receipts.router, prefix="/api/v1")
 app.include_router(user.router, prefix="/api/v1")
 app.include_router(devices.router, prefix="/api/v1")
+app.include_router(chat.router, prefix="/api/v1")
 
 
 @app.get("/")

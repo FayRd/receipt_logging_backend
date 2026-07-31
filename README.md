@@ -74,6 +74,19 @@ All protected endpoints require the following HTTP headers:
 .\run.ps1
 ```
 
+### Running with Docker Compose (Standalone Container)
+
+```bash
+# Build and start container in background
+docker compose up -d --build
+
+# View container logs
+docker compose logs -f
+
+# Stop container
+docker compose down
+```
+
 Or manually:
 ```bash
 uvicorn main:app --host 0.0.0.0 --port 8085 --reload

@@ -31,6 +31,11 @@ async def register_device(
     needs to bootstrap itself before it can present a valid X-Device-Token.
     """
     device = await repo.register_or_update(body)
+    if not device:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid device token for existing device_id.",
+        )
     return device
 
 
@@ -56,12 +61,20 @@ async def get_my_device(
 @router.post("/link", response_model=DeviceRecord)
 async def link_device_user(
     body: DeviceLinkRequest,
+    identity: Identity = Depends(get_current_identity),
     repo: DeviceRepository = Depends(get_repo),
 ):
     """Link a device to a user account, or pass user_id=null to unlink (guest mode).
 
-    Requires device_token in the request body for ownership verification.
+    Requires valid X-Device-ID and X-Device-Token headers.
+    Enforces that body.device_id matches identity.device_id to prevent cross-device hijacking.
     """
+    if body.device_id.strip() != identity.device_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Cannot modify link status for another device_id.",
+        )
+
     device = await repo.link_user(body.device_id, body.device_token, body.user_id)
     if not device:
         raise HTTPException(

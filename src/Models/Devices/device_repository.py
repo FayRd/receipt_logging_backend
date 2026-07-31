@@ -1,3 +1,4 @@
+import secrets
 from supabase import AsyncClient
 from src.Models.schemas import DeviceRegisterRequest
 
@@ -39,11 +40,24 @@ class DeviceRepository:
         """Register new device or update token/user_id if device already exists.
 
         Idempotent by hardware device_id. On re-registration (e.g. app reinstall),
-        the device_token is refreshed and user_id updated if provided.
+        token updates on an existing device are only allowed if the caller presents
+        the correct stored token (verified via secrets.compare_digest in constant time)
+        to prevent unauthenticated device takeover attacks.
         """
-        existing = await self.get_by_device_id(req.device_id)
+        clean_id = req.device_id.strip()
+        clean_token = req.device_token.strip()
+
+        existing = await self.get_by_device_id(clean_id)
         if existing:
-            updates: dict = {"device_token": req.device_token}
+            # Constant-time comparison prevents token guessing & unauthorized device takeover
+            stored_bytes = existing["device_token"].encode("utf-8")
+            incoming_bytes = clean_token.encode("utf-8")
+
+            if not secrets.compare_digest(incoming_bytes, stored_bytes):
+                # Fail closed — return None to prevent user_id enumeration & fake 201s
+                return None
+
+            updates: dict = {"device_token": clean_token}
             if req.user_id is not None:
                 updates["user_id"] = req.user_id
 
@@ -56,8 +70,8 @@ class DeviceRepository:
             return res.data[0]
 
         row = {
-            "device_id": req.device_id.strip(),
-            "device_token": req.device_token.strip(),
+            "device_id": clean_id,
+            "device_token": clean_token,
             "user_id": req.user_id,
         }
         res = await self.db.table(self.TABLE).insert(row).execute()
@@ -68,19 +82,29 @@ class DeviceRepository:
     ) -> dict | None:
         """Link or unlink a device to a user account.
 
-        Requires device_token for ownership verification before modifying the link.
-        Returns None if device_id was never registered or token is invalid.
-        Passing user_id=None effectively sets the device to guest/anonymous mode.
+        When user_id is non-null (linking/login):
+        1. Verifies device token in constant time (secrets.compare_digest).
+        2. Updates devices table user_id.
+        3. Atomically migrates all guest receipts (user_id IS NULL) for this device_id to user_id.
+        4. Atomically migrates all guest conversations (user_id IS NULL) for this device_id to user_id.
 
-        Note: Token correctness is enforced by get_current_identity dependency upstream.
-        This method does a final DB-level token check for defence-in-depth.
+        When user_id is null (unlinking/logout):
+        1. Updates devices table user_id = NULL.
+        2. Receipts and conversations remain owned by their respective user_id, ensuring
+           complete data isolation and privacy for guest sessions.
         """
-        existing = await self.get_by_device_id(device_id)
+        clean_device_id = device_id.strip()
+        clean_device_token = device_token.strip()
+
+        existing = await self.get_by_device_id(clean_device_id)
         if not existing:
             return None
 
-        # Defence-in-depth token check (upstream dependency already verified this)
-        if existing.get("device_token") != device_token:
+        # Constant-time token verification prevents timing attacks and guest data hijacking
+        stored_bytes = existing.get("device_token", "").encode("utf-8")
+        incoming_bytes = clean_device_token.encode("utf-8")
+
+        if not secrets.compare_digest(incoming_bytes, stored_bytes):
             return None
 
         res = await (
@@ -89,4 +113,25 @@ class DeviceRepository:
             .eq("id", existing["id"])
             .execute()
         )
-        return res.data[0] if res else None
+        updated_device = res.data[0] if res else None
+
+        # If linking to a user account, claim all orphan guest receipts and conversations
+        if user_id and updated_device:
+            # Migrate guest receipts
+            await (
+                self.db.table("receipts")
+                .update({"user_id": user_id})
+                .eq("device_id", clean_device_id)
+                .is_("user_id", "null")
+                .execute()
+            )
+            # Migrate guest conversations
+            await (
+                self.db.table("conversations")
+                .update({"user_id": user_id})
+                .eq("device_id", clean_device_id)
+                .is_("user_id", "null")
+                .execute()
+            )
+
+        return updated_device

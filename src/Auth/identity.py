@@ -76,11 +76,18 @@ async def get_current_identity(
             detail="Invalid device authentication token.",
         )
 
-    # Prefer X-User-ID header; fall back to user_id linked at device registration
-    clean_user_id = x_user_id.strip() if x_user_id and x_user_id.strip() else None
-    effective_user_id = clean_user_id or device.get("user_id")
+    # Derive user_id strictly from database mapping (ground truth)
+    db_user_id = device.get("user_id")
 
-    return Identity(user_id=effective_user_id, device_id=clean_device_id)
+    # If client passed X-User-ID header, verify it matches DB ground truth to prevent identity spoofing
+    clean_user_id = x_user_id.strip() if x_user_id and x_user_id.strip() else None
+    if clean_user_id and clean_user_id != db_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Header X-User-ID does not match authenticated user session for this device.",
+        )
+
+    return Identity(user_id=db_user_id, device_id=clean_device_id)
 
 
 async def require_user_identity(

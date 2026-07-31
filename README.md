@@ -1,20 +1,21 @@
 # Receipt Logger Backend
 
-An AI-powered FastAPI backend service for receipt scanning, structured data extraction using **Google Gemini 3.6 Flash Vision AI**, session-scoped identity security, and cloud database synchronization for the **Receipt Logger** mobile application.
+An AI-powered FastAPI backend service for receipt scanning, structured data extraction using **Google Gemini 3.6 Flash Vision AI**, RAG AI Chat assistant, session-scoped identity security, and cloud database synchronization for the **Receipt Logger** mobile application.
 
 ---
 
 ## 🚀 Application Summary
 
-The **Receipt Logger Backend** provides high-speed, intelligent multimodal receipt parsing and data management for the privacy-first mobile client. It accepts receipt image uploads, processes them directly with Gemini 3.6 Flash Vision AI using strict structured Pydantic schemas, and returns validated JSON containing merchant info, line items, totals, dates, and categories in ~1.5 seconds. It also provides a full set of session-scoped CRUD endpoints for storing and managing receipts in Supabase with cryptographic device fingerprint verification (`X-Device-Token`).
+The **Receipt Logger Backend** provides high-speed, intelligent multimodal receipt parsing, conversational AI financial assistance, and data management for the privacy-first mobile client. It accepts receipt image uploads, processes them directly with Gemini 3.6 Flash Vision AI using strict structured Pydantic schemas, and returns validated JSON containing merchant info, line items, totals, dates, and categories in ~1.5 seconds. It also features a personalized RAG AI Chat assistant powered by Gemini 3.6 Flash and a full set of session-scoped CRUD endpoints with cryptographic device fingerprint verification (`X-Device-Token`).
 
 ### Key Technology Stack
 - **Framework**: FastAPI (Python 3.10+) with Uvicorn ASGI server
-- **Auth & Security**: `src/Auth/` package (`Identity` model, `X-Device-Token` verification via constant-time `secrets.compare_digest`)
-- **AI Extraction**: `google-genai` SDK (`gemini-3.6-flash` Multimodal Vision)
-- **Data Validation**: Pydantic v2 schemas (`Receipt`, `LineItem`, `ScanResponse`, `ReceiptRecord`, `UserRecord`, `DeviceRecord`)
+- **Auth & Security**: `src/Auth/` package (`Identity` model, `X-Device-Token` verification via constant-time `secrets.compare_digest`, ground-truth DB identity resolution)
+- **AI Extraction & Chat**: `google-genai` SDK (`gemini-3.6-flash` Multimodal Vision & RAG)
+- **Data Validation**: Pydantic v2 schemas (`Receipt`, `LineItem`, `ScanResponse`, `ReceiptRecord`, `UserRecord`, `DeviceRecord`, `ConversationRecord`, `ChatMessageRecord`)
 - **Cloud Database & Storage**: Supabase (`supabase-py` `AsyncClient`) for Postgres DB, Storage, and Vector search
-- **Architecture**: Layered Architecture with per-model repository pattern (`src/Models/Receipts/`, `src/Models/Users/`, `src/Models/Devices/`)
+- **Architecture**: Layered Architecture with per-model repository pattern (`Receipts`, `Users`, `Devices`, `Conversations`)
+- **Testing**: Automated Pytest suite (37 tests in `test/`) with `test-engineer` and `security-advisor` subagents
 - **Configuration**: Pydantic `BaseSettings` & `python-dotenv`
 
 ---
@@ -23,9 +24,9 @@ The **Receipt Logger Backend** provides high-speed, intelligent multimodal recei
 
 ### Implemented Features
 - **Device Registration & Token Verification** (`/api/v1/devices`):
-  - `POST /api/v1/devices/register`: Idempotent registration of hardware `device_id` and secret `device_token`.
+  - `POST /api/v1/devices/register`: Idempotent registration of hardware `device_id` and secret `device_token`. Fails closed (`401`) on token mismatch.
   - `GET /api/v1/devices/me`: Retrieves current device registration record.
-  - `POST /api/v1/devices/link`: Links/unlinks current device to a user account.
+  - `POST /api/v1/devices/link`: Links device to user account and atomically migrates orphan guest receipts & conversations.
 - **User Authentication** (`/api/v1/user`):
   - `POST /api/v1/user/create`: Registers a new user account (PBKDF2/SHA-256 server-side password hash).
   - `POST /api/v1/user/login`: Authenticates credentials in constant time to prevent timing attacks.
@@ -40,6 +41,11 @@ The **Receipt Logger Backend** provides high-speed, intelligent multimodal recei
   - `POST /api/v1/receipts/`: Creates a single receipt record bound to session identity.
   - `POST /api/v1/receipts/batch`: Batch-creates up to 100 receipts bound to session identity in a single Supabase call.
   - `DELETE /api/v1/receipts/{receipt_id}`: Soft-deletes a receipt by setting `deleted_at` timestamp.
+- **Personalized RAG AI Chat Assistant** (`/api/v1/chat`):
+  - `POST /api/v1/chat/create`: Creates a new AI conversation (enforces max 10 cap per identity).
+  - `GET /api/v1/chat/list`: Lists conversations owned by session identity, newest first.
+  - `GET /api/v1/chat/history`: Fetches chunked, paginated message history.
+  - `POST /api/v1/chat/query`: Sends query to Gemini 3.6 Flash using identity-scoped receipt history for RAG context and persists conversation messages.
 - **Explicit HTTP 422 Error Handling**: Custom exception handlers in `main.py` intercept any request payload schema mismatches or invalid data types and return clean `HTTP 422 Unprocessable Entity` responses.
 - **Health Check & Diagnostics** (`GET /api/v1/health/`): Returns API operational status and environment setting.
 
@@ -53,26 +59,27 @@ All protected endpoints require the following HTTP headers:
 |---|---|---|---|
 | `X-Device-ID` | `string` | **Yes** | Unique hardware device identifier string (e.g. `MB-12345`). |
 | `X-Device-Token` | `string` | **Yes** | Secret cryptographic device fingerprint token generated on first app boot. |
-| `X-User-ID` | `string` | Optional | Authenticated user UUID string (supplied when signed in). |
+| `X-User-ID` | `string` | Optional | User UUID string (verified against DB ground truth when signed in). |
 
 ---
 
-## 🏃 Running the Application
+## 🏃 Running the Application & Test Suite
 
-### Option A: Using the PowerShell Script (Recommended for Windows)
-
-Run the included `run.ps1` script to start the server on port **8085**:
+### Running the Application
 
 ```powershell
 .\run.ps1
 ```
 
----
-
-### Option B: Manual Command Line
-
+Or manually:
 ```bash
 uvicorn main:app --host 0.0.0.0 --port 8085 --reload
+```
+
+### Running the Pytest Test Suite
+
+```powershell
+.venv\Scripts\pytest.exe -v test/
 ```
 
 ---

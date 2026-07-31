@@ -63,7 +63,7 @@ def mock_user_session(client, mock_device):
         "device_id": mock_device["device_id"],
         "device_token": mock_device["device_token"],
         "user_id": user_id
-    })
+    }, headers=mock_device["headers"])
     assert link_res.status_code == 200
     
     headers = dict(mock_device["headers"])

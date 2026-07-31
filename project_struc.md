@@ -11,8 +11,11 @@ For full project scope and API specifications, see [PROJECT_SCOPE.md](file:///C:
 
 ```
 receipt_logging_backend/
-├── .agents/                    # Custom agentic skills & engineering guidelines
-│   └── skills/                 # FastAPI, Instructor, RAG AI Chat, and Supabase skills
+├── .agents/                    # Agentic specifications & engineering guidelines
+│   ├── agents/                 # Custom subagent markdown specifications
+│   │   ├── security-advisor/   # Security Engineer & Vulnerability Auditor agent spec (agent.md)
+│   │   └── test-engineer/      # QA & Test Engineering agent spec (agent.md)
+│   └── skills/                 # Agent skills (FastAPI, RAG Chat, Supabase)
 ├── .env                        # Environment variable configuration (git-ignored)
 ├── main.py                     # FastAPI application entrypoint, middleware & exception handlers
 ├── README.md                   # Project overview, setup, curl examples & execution guide

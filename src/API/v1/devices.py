@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from supabase import AsyncClient
 from src.Infrastructure.database import get_supabase_client
+from src.Auth.identity import Identity, get_current_identity
 from src.Models.schemas import (
     DeviceRegisterRequest,
     DeviceLinkRequest,
@@ -16,31 +17,39 @@ async def get_repo(db: AsyncClient = Depends(get_supabase_client)) -> DeviceRepo
 
 
 # ── POST /devices/register ────────────────────────────────────────────────────
+# NOTE: This is an unauthenticated bootstrap endpoint — the device cannot send
+# X-Device-Token before registration, so we do not apply get_current_identity here.
 @router.post("/register", response_model=DeviceRecord, status_code=201)
 async def register_device(
     body: DeviceRegisterRequest,
     repo: DeviceRepository = Depends(get_repo),
 ):
-    """Register a new device hardware ID or update its user association.
+    """Register a new device hardware ID and fingerprint token, or refresh an existing one.
 
-    Idempotent — calling with the same device_id a second time updates the
-    user_id if it changed, or returns the existing record unchanged.
+    Idempotent — calling with the same device_id updates the token and user association.
+    This endpoint is intentionally public (no auth dependency) because the device
+    needs to bootstrap itself before it can present a valid X-Device-Token.
     """
     device = await repo.register_or_update(body)
     return device
 
 
-# ── GET /devices/user/{user_id} ───────────────────────────────────────────────
-# NOTE: This route must be declared BEFORE /{device_id} to avoid FastAPI
-# interpreting the literal string "user" as a device_id path parameter.
-@router.get("/user/{user_id}", response_model=list[DeviceRecord])
-async def list_user_devices(
-    user_id: str,
+# ── GET /devices/me ───────────────────────────────────────────────────────────
+# NOTE: Must be declared BEFORE /{device_id} to prevent FastAPI treating
+# the literal string "me" as a device_id path parameter.
+@router.get("/me", response_model=DeviceRecord)
+async def get_my_device(
+    identity: Identity = Depends(get_current_identity),
     repo: DeviceRepository = Depends(get_repo),
 ):
-    """List all active devices associated with a specific user UUID."""
-    devices = await repo.get_by_user_id(user_id)
-    return devices
+    """Retrieve the device record for the calling device's X-Device-ID.
+
+    Requires valid X-Device-ID and X-Device-Token headers.
+    """
+    device = await repo.get_by_device_id(identity.device_id)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device not found.")
+    return device
 
 
 # ── POST /devices/link ────────────────────────────────────────────────────────
@@ -49,21 +58,14 @@ async def link_device_user(
     body: DeviceLinkRequest,
     repo: DeviceRepository = Depends(get_repo),
 ):
-    """Link a device to a user account, or pass user_id=null to unlink (guest mode)."""
-    device = await repo.link_user(body.device_id, body.user_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="Device not registered.")
-    return device
+    """Link a device to a user account, or pass user_id=null to unlink (guest mode).
 
-
-# ── GET /devices/{device_id} ──────────────────────────────────────────────────
-@router.get("/{device_id}", response_model=DeviceRecord)
-async def get_device(
-    device_id: str,
-    repo: DeviceRepository = Depends(get_repo),
-):
-    """Retrieve device registration record by hardware device_id string."""
-    device = await repo.get_by_device_id(device_id)
+    Requires device_token in the request body for ownership verification.
+    """
+    device = await repo.link_user(body.device_id, body.device_token, body.user_id)
     if not device:
-        raise HTTPException(status_code=404, detail="Device not found.")
+        raise HTTPException(
+            status_code=401,
+            detail="Device not registered or invalid device token.",
+        )
     return device

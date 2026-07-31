@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from supabase import AsyncClient
 from src.Infrastructure.database import get_supabase_client
+from src.Auth.identity import Identity, get_current_identity, require_user_identity
 from src.Models.schemas import (
     UserCreateRequest,
     UserLoginRequest,
@@ -22,7 +23,10 @@ async def create_user(
     body: UserCreateRequest,
     repo: UserRepository = Depends(get_repo),
 ):
-    """Register a new user account. Rejects duplicate usernames (case-insensitive)."""
+    """Register a new user account. Rejects duplicate usernames (case-insensitive).
+
+    This is an unauthenticated public endpoint — no device token required.
+    """
     existing = await repo.get_by_username(body.username)
     if existing:
         raise HTTPException(status_code=409, detail="Username already taken.")
@@ -39,9 +43,10 @@ async def login_user(
 ):
     """Authenticate user credentials and return sanitized user profile.
 
+    This is an unauthenticated public endpoint — no device token required.
     The client sends a pre-encrypted password string. The backend applies
-    a server-side PBKDF2/SHA-256 hash on top before comparing against the
-    stored hash, preventing pass-the-hash attacks.
+    server-side PBKDF2/SHA-256 on top before comparing against the stored hash,
+    preventing pass-the-hash attacks.
     """
     user = await repo.get_by_username(body.username)
     # Identical error for missing user AND wrong password — prevents username enumeration
@@ -56,14 +61,18 @@ async def login_user(
     return UserLoginResponse(success=True, user=user, message="Login successful.")
 
 
-# ── GET /user/{user_id} ───────────────────────────────────────────────────────
-@router.get("/{user_id}", response_model=UserRecord)
-async def get_user(
-    user_id: str,
+# ── GET /user/me ──────────────────────────────────────────────────────────────
+@router.get("/me", response_model=UserRecord)
+async def get_my_profile(
+    identity: Identity = Depends(require_user_identity),
     repo: UserRepository = Depends(get_repo),
 ):
-    """Retrieve a specific user's public profile by UUID. Password is never returned."""
-    user = await repo.get_by_id(user_id)
+    """Retrieve the current authenticated user's profile.
+
+    Requires X-Device-ID, X-Device-Token, and X-User-ID headers.
+    Returns 401 if not signed in.
+    """
+    user = await repo.get_by_id(identity.user_id)
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
     return user

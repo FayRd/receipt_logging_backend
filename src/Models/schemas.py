@@ -53,16 +53,18 @@ class ReceiptRecord(BaseModel):
 
 
 class ReceiptCreateRequest(BaseModel):
-    """Request body for creating a single receipt record."""
-    user_id: str
-    device_id: str
+    """Request body for creating a single receipt record.
+
+    Identity (user_id + device_id) is resolved server-side from session headers.
+    """
     receipt: Receipt
 
 
 class ReceiptBatchCreateRequest(BaseModel):
-    """Request body for batch-creating up to 100 receipt records in one DB call."""
-    user_id: str
-    device_id: str
+    """Request body for batch-creating up to 100 receipt records in one DB call.
+
+    Identity (user_id + device_id) is resolved server-side from session headers.
+    """
     receipts: list[Receipt] = Field(..., min_length=1, max_length=100)
 
 
@@ -105,9 +107,10 @@ class UserLoginResponse(BaseModel):
 # ── CHAT / CONVERSATION SCHEMAS ───────────────────────────────────────────────
 
 class ConversationCreateRequest(BaseModel):
-    """Request body for creating a new conversation."""
-    user_id: str | None = None
-    device_id: str
+    """Request body for creating a new conversation.
+
+    Identity (user_id + device_id) is resolved server-side from session headers.
+    """
     title: str | None = None
 
 
@@ -130,10 +133,11 @@ class ChatMessageRecord(BaseModel):
 
 
 class ChatQueryRequest(BaseModel):
-    """Request body for sending a message to the AI."""
+    """Request body for sending a message to the AI.
+
+    Identity (user_id + device_id) is resolved server-side from session headers.
+    """
     conversation_id: str
-    user_id: str | None = None
-    device_id: str
     message: str = Field(..., min_length=1, max_length=2000)
 
 
@@ -153,14 +157,22 @@ class ChatHistoryResponse(BaseModel):
 # ── DEVICE SCHEMAS ────────────────────────────────────────────────────────────
 
 class DeviceRegisterRequest(BaseModel):
-    """Request body for registering or updating a device."""
+    """Request body for registering or updating a device.
+
+    device_token is the cryptographic hardware fingerprint generated on first app boot.
+    """
     device_id: str = Field(..., min_length=3, max_length=100)
+    device_token: str = Field(..., min_length=8, max_length=256)
     user_id: str | None = None
 
 
 class DeviceLinkRequest(BaseModel):
-    """Request body for linking/unlinking a device to a user account."""
+    """Request body for linking/unlinking a device to a user account.
+
+    Requires device_token for ownership verification before modifying the link.
+    """
     device_id: str
+    device_token: str
     user_id: str | None = None  # None unlinks the user (guest mode)
 
 

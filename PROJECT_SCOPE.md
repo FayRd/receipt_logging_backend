@@ -8,54 +8,77 @@ The **Receipt Logger Backend** is an AI-powered REST API built with **FastAPI**,
 ## System Architecture & Workflow
 
 ```
-[Flutter Mobile App] 
-       │ (1) POST /api/v1/scan/parse (Multipart Image + device_id)
-       ▼
-[FastAPI Backend] ──(2) Image Bytes + System Prompt──> [Google Gemini 3.6 Flash Vision API]
-       │                                                              │
-       │ <──(3) Validated Pydantic Receipt JSON ──────────────────────┘
-       │
-       ├──(4) Return JSON Response to Client ──> [Flutter App (Isar DB & Review Sheet)]
-       │
-       └──(5) POST /api/v1/receipts/ (Create/Batch Sync) ──> [Supabase Postgres DB]
+┌────────────────────────────────────────────────────────────────────────┐
+│                        Incoming Mobile HTTP Request                    │
+│ Header: X-Device-ID: "MB-12345"       (Required for all calls)         │
+│ Header: X-Device-Token: "sec-token"   (Required — device fingerprint) │
+│ Header: X-User-ID: "user-uuid"        (Optional — present when logged) │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│               FastAPI Security Dependency: get_current_identity        │
+│ 1. Validates X-Device-Token against devices table (secrets.compare_digest)│
+│ 2. Resolves caller's Identity(user_id="user-uuid", device_id="MB-12345")│
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                  ┌─────────────────┴─────────────────┐
+                  │                                   │
+                  ▼                                   ▼
+┌───────────────────────────────────┐   ┌───────────────────────────────────┐
+│ [Scan Parsing Engine]             │   │ [Session-Scoped CRUD Engine]      │
+│ POST /api/v1/scan/parse           │   │ GET  /api/v1/receipts/            │
+│ Gemini 3.6 Flash Vision AI        │   │ POST /api/v1/receipts/            │
+│ Returns validated JSON            │   │ GET  /api/v1/user/me              │
+└───────────────────────────────────┘   │ GET  /api/v1/devices/me           │
+                                        └───────────────────────────────────┘
 ```
 
 ---
 
 ## API Endpoints & Implementation Status
 
-| # | Endpoint Route | HTTP Method | Description & Core Logic | Implementation Status |
-|---|---|---|---|---|
-| 1 | `/api/v1/health` | `GET` | Health check, environment details, system status | **Implemented** ([health.py](file:///C:/mobile-development/receipt_logging_backend/src/API/v1/health.py)) |
-| 2 | `/api/v1/scan/parse` | `POST` | Accepts multipart receipt image, extracts structured JSON via Gemini 3.6 Flash Vision API | **Implemented** ([scan.py](file:///C:/mobile-development/receipt_logging_backend/src/API/v1/scan.py)) |
-| 3 | `/api/v1/receipts/user/{user_id}` | `GET` | Gets all non-deleted receipts owned by a specific user UUID | **Implemented** ([receipts.py](file:///C:/mobile-development/receipt_logging_backend/src/API/v1/receipts.py)) |
-| 4 | `/api/v1/receipts/{receipt_id}` | `GET` | Gets a single receipt by UUID (requires `user_id` query param ownership check) | **Implemented** ([receipts.py](file:///C:/mobile-development/receipt_logging_backend/src/API/v1/receipts.py)) |
-| 5 | `/api/v1/receipts/` | `POST` | Creates a new receipt row in Supabase associated with owner's `user_id` | **Implemented** ([receipts.py](file:///C:/mobile-development/receipt_logging_backend/src/API/v1/receipts.py)) |
-| 6 | `/api/v1/receipts/batch` | `POST` | Batch creates up to 100 receipt records for a user in a single DB call | **Implemented** ([receipts.py](file:///C:/mobile-development/receipt_logging_backend/src/API/v1/receipts.py)) |
-| 7 | `/api/v1/receipts/{receipt_id}` | `DELETE` | Soft-deletes a receipt by setting `deleted_at` timestamp (requires `user_id` query check) | **Implemented** ([receipts.py](file:///C:/mobile-development/receipt_logging_backend/src/API/v1/receipts.py)) |
-| 8 | `/api/v1/chat/query` | `POST` | RAG AI conversational query over user receipt embeddings (`pgvector`) | *Planned* |
+| # | Endpoint Route | HTTP Method | Header Requirements | Description & Core Logic | Implementation Status |
+|---|---|---|---|---|---|
+| 1 | `/api/v1/health/` | `GET` | None | Health check, environment details, system status | **Implemented** |
+| 2 | `/api/v1/devices/register` | `POST` | None | Idempotent device registration & fingerprint token refresh | **Implemented** |
+| 3 | `/api/v1/devices/me` | `GET` | `X-Device-ID`, `X-Device-Token` | Retrieves device registration record for current hardware ID | **Implemented** |
+| 4 | `/api/v1/devices/link` | `POST` | `X-Device-ID`, `X-Device-Token` | Links or unlinks current device to a user account | **Implemented** |
+| 5 | `/api/v1/user/create` | `POST` | None | Public registration for new user account (PBKDF2 password hash) | **Implemented** |
+| 6 | `/api/v1/user/login` | `POST` | None | Public user login authentication | **Implemented** |
+| 7 | `/api/v1/user/me` | `GET` | `X-Device-ID`, `X-Device-Token`, `X-User-ID` | Retrieves authenticated user profile | **Implemented** |
+| 8 | `/api/v1/scan/parse` | `POST` | Multipart upload | Extracts structured JSON via Gemini 3.6 Flash Vision API | **Implemented** |
+| 9 | `/api/v1/receipts/` | `GET` | `X-Device-ID`, `X-Device-Token`, `X-User-ID`? | Gets all non-deleted receipts owned by session identity | **Implemented** |
+| 10 | `/api/v1/receipts/{receipt_id}` | `GET` | `X-Device-ID`, `X-Device-Token`, `X-User-ID`? | Gets single receipt by UUID (session ownership enforced) | **Implemented** |
+| 11 | `/api/v1/receipts/` | `POST` | `X-Device-ID`, `X-Device-Token`, `X-User-ID`? | Creates a receipt record bound to session identity | **Implemented** |
+| 12 | `/api/v1/receipts/batch` | `POST` | `X-Device-ID`, `X-Device-Token`, `X-User-ID`? | Batch creates up to 100 receipts bound to session identity | **Implemented** |
+| 13 | `/api/v1/receipts/{receipt_id}` | `DELETE` | `X-Device-ID`, `X-Device-Token`, `X-User-ID`? | Soft-deletes receipt by UUID (session ownership enforced) | **Implemented** |
+| 14 | `/api/v1/chat/create` | `POST` | `X-Device-ID`, `X-Device-Token`, `X-User-ID`? | Creates a new AI conversation | *Planned* |
+| 15 | `/api/v1/chat/list` | `GET` | `X-Device-ID`, `X-Device-Token`, `X-User-ID`? | Lists user's AI conversations | *Planned* |
+| 16 | `/api/v1/chat/history` | `GET` | `X-Device-ID`, `X-Device-Token`, `X-User-ID`? | Gets conversation message history (chunked limits) | *Planned* |
+| 17 | `/api/v1/chat/query` | `POST` | `X-Device-ID`, `X-Device-Token`, `X-User-ID`? | Conversational AI query over receipt history | *Planned* |
+
+---
+
+## HTTP Status Code Standards
+
+- **`200 OK`**: Successful read, update, soft-delete, or scan parsing.
+- **`201 Created`**: Successful creation of user, device registration, or receipt(s).
+- **`400 Bad Request`**: Missing required headers or empty parameter strings.
+- **`401 Unauthorized`**: Unregistered device, invalid `device_token`, or missing user auth on `/me` routes.
+- **`404 Not Found`**: Resource does not exist or is not owned by the calling identity.
+- **`409 Conflict`**: Username already taken on registration.
+- **`422 Unprocessable Entity`**: Payload schema validation mismatch or malformed JSON data.
+- **`500 Internal Server Error`**: Unexpected server error.
 
 ---
 
 ## Technology Stack
 
 - **Framework**: FastAPI 0.140+ with Uvicorn ASGI server
+- **Authentication & Security**: `src/Auth/` package (`Identity` model, `get_current_identity` dependency, constant-time `secrets.compare_digest` device token verification)
 - **AI / LLM Engine**: `google-genai` SDK (`gemini-3.6-flash` Vision) for multimodal structured output parsing
-- **Data Validation**: Pydantic v2 schemas (`Receipt`, `LineItem`, `ScanResponse`, `ReceiptRecord` with UUID string IDs, `ReceiptCreateRequest`, `ReceiptBatchCreateRequest`)
-- **Database & Cloud Storage**: Supabase (`supabase-py`) for Postgres DB, Storage Buckets, and `pgvector` embeddings
-- **Architecture Pattern**: Thin Routers + Repository Pattern per Model (`src/Models/Receipts/receipt_repository.py`)
+- **Data Validation**: Pydantic v2 schemas (`Receipt`, `LineItem`, `ScanResponse`, `ReceiptRecord`, `UserRecord`, `DeviceRecord`)
+- **Database & Cloud Storage**: Supabase (`supabase-py`) `AsyncClient` for Postgres DB, Storage Buckets, and `pgvector`
+- **Architecture Pattern**: Thin Routers + Repository Pattern per Model (`src/Models/Receipts/`, `src/Models/Users/`, `src/Models/Devices/`)
 - **Configuration**: Pydantic `BaseSettings` (`python-dotenv`)
-
----
-
-## Backend Codebase Audit & Active Files
-
-1. **App Entrypoint** — [main.py](file:///C:/mobile-development/receipt_logging_backend/main.py)
-2. **Environment Configuration** — [config.py](file:///C:/mobile-development/receipt_logging_backend/src/config.py)
-3. **Data Schemas** — [schemas.py](file:///C:/mobile-development/receipt_logging_backend/src/Models/schemas.py)
-4. **Receipts Repository** — [receipt_repository.py](file:///C:/mobile-development/receipt_logging_backend/src/Models/Receipts/receipt_repository.py)
-5. **AI Extraction Service** — [extraction_service.py](file:///C:/mobile-development/receipt_logging_backend/src/Services/extraction_service.py)
-6. **Database Infrastructure** — [database.py](file:///C:/mobile-development/receipt_logging_backend/src/Infrastructure/database.py)
-7. **Scan API Router** — [scan.py](file:///C:/mobile-development/receipt_logging_backend/src/API/v1/scan.py)
-8. **Receipts API Router** — [receipts.py](file:///C:/mobile-development/receipt_logging_backend/src/API/v1/receipts.py)
-9. **Health API Router** — [health.py](file:///C:/mobile-development/receipt_logging_backend/src/API/v1/health.py)

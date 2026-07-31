@@ -10,10 +10,14 @@ services:
     ports:
       - "8085:8085"
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       - PORT=8085
-      - ENVIRONMENT=production
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - SUPABASE_URL=${SUPABASE_URL}
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8085/api/v1/health/ || exit 1"]
       interval: 30s

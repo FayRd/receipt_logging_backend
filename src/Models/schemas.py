@@ -148,3 +148,25 @@ class ChatHistoryResponse(BaseModel):
     messages: list[ChatMessageRecord]
     total_count: int
     has_more: bool
+
+
+# ── DEVICE SCHEMAS ────────────────────────────────────────────────────────────
+
+class DeviceRegisterRequest(BaseModel):
+    """Request body for registering or updating a device."""
+    device_id: str = Field(..., min_length=3, max_length=100)
+    user_id: str | None = None
+
+
+class DeviceLinkRequest(BaseModel):
+    """Request body for linking/unlinking a device to a user account."""
+    device_id: str
+    user_id: str | None = None  # None unlinks the user (guest mode)
+
+
+class DeviceRecord(BaseModel):
+    id: str
+    device_id: str
+    user_id: str | None = None
+    created_at: datetime
+    deleted_at: datetime | None = None

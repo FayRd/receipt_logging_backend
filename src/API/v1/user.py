@@ -76,3 +76,22 @@ async def get_my_profile(
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
     return user
+
+
+# ── DELETE /user/me ───────────────────────────────────────────────────────────
+@router.delete("/me", status_code=200)
+async def delete_my_profile(
+    identity: Identity = Depends(require_user_identity),
+    repo: UserRepository = Depends(get_repo),
+):
+    """Soft-delete current authenticated user profile.
+
+    Requires authenticated user session (X-User-ID header). Returns 401 if guest.
+    """
+    deleted = await repo.soft_delete(identity.user_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=404,
+            detail="User profile not found or already deleted.",
+        )
+    return {"success": True, "message": "User profile soft-deleted successfully."}

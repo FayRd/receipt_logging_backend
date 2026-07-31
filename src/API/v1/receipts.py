@@ -41,7 +41,7 @@ async def get_receipt(
 
 
 # ── CREATE single receipt ─────────────────────────────────────────────────────
-@router.post("/", response_model=ReceiptRecord, status_code=201)
+@router.post("/create", response_model=ReceiptRecord, status_code=201)
 async def create_receipt(
     body: ReceiptCreateRequest,
     identity: Identity = Depends(get_current_identity),
@@ -52,7 +52,7 @@ async def create_receipt(
 
 
 # ── CREATE batch receipts ─────────────────────────────────────────────────────
-@router.post("/batch", response_model=list[ReceiptRecord], status_code=201)
+@router.post("/create/batch", response_model=list[ReceiptRecord], status_code=201)
 async def create_receipts_batch(
     body: ReceiptBatchCreateRequest,
     identity: Identity = Depends(get_current_identity),

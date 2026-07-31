@@ -125,3 +125,24 @@ async def send_chat_query(
         user_message=user_msg,
         assistant_message=ai_msg,
     )
+
+
+# ── 5. DELETE /chat/{conversation_id} ─────────────────────────────────────────
+@router.delete("/{conversation_id}", status_code=200)
+async def delete_conversation(
+    conversation_id: str,
+    identity: Identity = Depends(get_current_identity),
+    repo: ConversationRepository = Depends(get_repo),
+):
+    """Soft-delete a conversation by UUID.
+
+    Verifies that the conversation is owned by the caller's session identity.
+    Returns HTTP 404 if not found, already deleted, or not owned by caller.
+    """
+    deleted = await repo.soft_delete(conversation_id, identity)
+    if not deleted:
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found or already deleted.",
+        )
+    return {"success": True, "conversation_id": conversation_id}

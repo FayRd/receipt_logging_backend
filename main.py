@@ -69,12 +69,16 @@ async def pydantic_validation_exception_handler(request: Request, exc: Validatio
 
 # ── MIDDLEWARE ────────────────────────────────────────────────────────────────
 
+# Allow localhost, local network IPs (192.168.x.x, 10.x.x.x), and Tailscale networks (100.x.x.x, *.ts.net)
+LOCAL_NETWORK_CORS_REGEX = r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|100\.\d{1,3}\.\d{1,3}\.\d{1,3}|.*\.ts\.net)(:\d+)?$"
+
 settings = get_settings()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
+    allow_origin_regex=LOCAL_NETWORK_CORS_REGEX,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 

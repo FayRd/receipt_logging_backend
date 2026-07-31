@@ -112,3 +112,42 @@ def test_chat_query_missing_message(client, mock_device):
     }, headers=mock_device["headers"])
     assert res.status_code == 422
 
+def test_delete_chat_success(client, mock_device):
+    create_res = client.post("/api/v1/chat/create", headers=mock_device["headers"])
+    conv_id = create_res.json()["id"]
+    
+    del_res = client.delete(f"/api/v1/chat/{conv_id}", headers=mock_device["headers"])
+    assert del_res.status_code == 200
+
+def test_delete_chat_unowned(client, mock_device):
+    # Device A creates conversation
+    create_res = client.post("/api/v1/chat/create", headers=mock_device["headers"])
+    conv_id = create_res.json()["id"]
+    
+    # Device B tries to delete it
+    import uuid
+    device_b_id = f"DEV-B-{uuid.uuid4().hex[:6]}"
+    device_b_token = f"token-B-{uuid.uuid4().hex}"
+    client.post("/api/v1/devices/register", json={
+        "device_id": device_b_id,
+        "device_token": device_b_token
+    })
+    
+    headers_b = {
+        "X-Device-ID": device_b_id,
+        "X-Device-Token": device_b_token
+    }
+    
+    del_res = client.delete(f"/api/v1/chat/{conv_id}", headers=headers_b)
+    assert del_res.status_code == 404
+
+def test_delete_chat_already_deleted(client, mock_device):
+    create_res = client.post("/api/v1/chat/create", headers=mock_device["headers"])
+    conv_id = create_res.json()["id"]
+    
+    res1 = client.delete(f"/api/v1/chat/{conv_id}", headers=mock_device["headers"])
+    assert res1.status_code == 200
+    
+    res2 = client.delete(f"/api/v1/chat/{conv_id}", headers=mock_device["headers"])
+    assert res2.status_code == 404
+

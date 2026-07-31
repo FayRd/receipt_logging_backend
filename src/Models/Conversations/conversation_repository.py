@@ -108,3 +108,20 @@ class ConversationRepository:
         }
         res = await self.db.table(self.MESSAGES_TABLE).insert(row).execute()
         return res.data[0]
+
+    # ── SOFT DELETE ───────────────────────────────────────────────────────────
+
+    async def soft_delete(self, conversation_id: str, identity: Identity) -> bool:
+        """Soft-delete a conversation owned by identity. Returns True if row affected."""
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).isoformat()
+        q = (
+            self.db.table(self.CONVERSATIONS_TABLE)
+            .update({"deleted_at": now})
+            .eq("id", conversation_id)
+            .is_("deleted_at", "null")
+        )
+        q = self._apply_identity_filter(q, identity)
+        res = await q.execute()
+        return len(res.data) > 0 if res and res.data else False

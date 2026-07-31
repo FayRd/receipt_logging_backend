@@ -69,7 +69,7 @@ def generate_receipt_payload():
 def test_device_link_migrates_guest_data(client, mock_device):
     # 1. Create guest receipt
     payload = {"receipt": generate_receipt_payload()}
-    res1 = client.post("/api/v1/receipts/", json=payload, headers=mock_device["headers"])
+    res1 = client.post("/api/v1/receipts/create", json=payload, headers=mock_device["headers"])
     assert res1.status_code == 201
     receipt_id = res1.json()["id"]
 
@@ -97,7 +97,7 @@ def test_device_link_migrates_guest_data(client, mock_device):
 def test_device_unlink_retains_user_data(client, mock_user_session):
     # 1. Create a receipt as logged-in user
     payload = {"receipt": generate_receipt_payload()}
-    res1 = client.post("/api/v1/receipts/", json=payload, headers=mock_user_session["headers"])
+    res1 = client.post("/api/v1/receipts/create", json=payload, headers=mock_user_session["headers"])
     assert res1.status_code == 201
     
     # 2. Unlink the device (set user_id = null)
@@ -118,3 +118,18 @@ def test_device_unlink_retains_user_data(client, mock_user_session):
     
     # Verify the guest has 0 receipts (data stayed with the user account)
     assert len(res3.json()) == 0
+
+def test_delete_device_me_success(client, mock_device):
+    response = client.delete("/api/v1/devices/me", headers=mock_device["headers"])
+    assert response.status_code == 200
+
+def test_delete_device_me_invalid_token(client, invalid_headers):
+    response = client.delete("/api/v1/devices/me", headers=invalid_headers)
+    assert response.status_code == 401
+
+def test_delete_device_me_already_deleted(client, mock_device):
+    res1 = client.delete("/api/v1/devices/me", headers=mock_device["headers"])
+    assert res1.status_code == 200
+    
+    res2 = client.delete("/api/v1/devices/me", headers=mock_device["headers"])
+    assert res2.status_code == 401

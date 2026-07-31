@@ -64,3 +64,20 @@ def test_user_me_unauthorized(client, mock_device):
     # Missing X-User-ID
     response = client.get("/api/v1/user/me", headers=mock_device["headers"])
     assert response.status_code == 401
+
+def test_delete_user_me_success(client, mock_user_session):
+    response = client.delete("/api/v1/user/me", headers=mock_user_session["headers"])
+    assert response.status_code == 200
+
+def test_delete_user_me_guest(client, mock_device):
+    response = client.delete("/api/v1/user/me", headers=mock_device["headers"])
+    assert response.status_code == 401
+
+def test_delete_user_me_already_deleted(client, mock_user_session):
+    # First delete
+    res1 = client.delete("/api/v1/user/me", headers=mock_user_session["headers"])
+    assert res1.status_code == 200
+    
+    # Second delete should be 401 (Unauthorized) because session is revoked
+    res2 = client.delete("/api/v1/user/me", headers=mock_user_session["headers"])
+    assert res2.status_code == 401

@@ -14,5 +14,5 @@ def test_unauthorized_unregistered_device_id(client, invalid_headers):
 
 def test_invalid_json_structure(client, mock_device):
     # Completely invalid structure for POST /receipts/
-    response = client.post("/api/v1/receipts/", json={"completely_wrong": "structure"}, headers=mock_device["headers"])
+    response = client.post("/api/v1/receipts/create", json={"completely_wrong": "structure"}, headers=mock_device["headers"])
     assert response.status_code == 422

@@ -135,3 +135,19 @@ class DeviceRepository:
             )
 
         return updated_device
+
+    # ── SOFT DELETE ───────────────────────────────────────────────────────────
+
+    async def soft_delete(self, device_id: str) -> bool:
+        """Soft-delete device record by setting deleted_at to now(). Returns True if affected."""
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc).isoformat()
+        res = await (
+            self.db.table(self.TABLE)
+            .update({"deleted_at": now})
+            .eq("device_id", device_id.strip())
+            .is_("deleted_at", "null")
+            .execute()
+        )
+        return len(res.data) > 0 if res and res.data else False

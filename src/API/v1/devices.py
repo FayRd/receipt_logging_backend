@@ -82,3 +82,22 @@ async def link_device_user(
             detail="Device not registered or invalid device token.",
         )
     return device
+
+
+# ── DELETE /devices/me ────────────────────────────────────────────────────────
+@router.delete("/me", status_code=200)
+async def delete_my_device(
+    identity: Identity = Depends(get_current_identity),
+    repo: DeviceRepository = Depends(get_repo),
+):
+    """Soft-delete calling device registration record.
+
+    Requires valid X-Device-ID and X-Device-Token headers.
+    """
+    deleted = await repo.soft_delete(identity.device_id)
+    if not deleted:
+        raise HTTPException(
+            status_code=404,
+            detail="Device record not found or already deleted.",
+        )
+    return {"success": True, "device_id": identity.device_id}

@@ -67,3 +67,53 @@ class UserRepository:
         user_data = res.data[0]
         user_data.pop("password", None)  # Never expose the hash
         return user_data
+
+    # ── SOFT DELETE ───────────────────────────────────────────────────────────
+
+    async def soft_delete(self, user_id: str) -> bool:
+        """Soft-delete user account by setting deleted_at to now() and unlinking all devices.
+
+        First attempts calling Supabase RPC 'soft_delete_user' (which runs as SECURITY DEFINER
+        with postgres privileges). If RPC is not created, falls back to direct table update.
+        """
+        from datetime import datetime, timezone
+
+        # 1. Try RPC first (SECURITY DEFINER bypasses RLS anon restriction)
+        try:
+            rpc_res = await self.db.rpc("soft_delete_user", {"target_user_id": user_id}).execute()
+            if rpc_res and rpc_res.data is True:
+                return True
+        except Exception:
+            pass  # RPC not installed in Supabase yet, fall back to direct update
+
+        # 2. Direct table update fallback
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            res = await (
+                self.db.table(self.TABLE)
+                .update({"deleted_at": now})
+                .eq("id", user_id)
+                .is_("deleted_at", "null")
+                .execute()
+            )
+            success = len(res.data) > 0 if res and res.data else False
+
+            if success:
+                # Terminate active sessions by reverting user's devices to guest mode
+                try:
+                    await (
+                        self.db.table("devices")
+                        .update({"user_id": None})
+                        .eq("user_id", user_id)
+                        .execute()
+                    )
+                except Exception:
+                    pass
+
+            return success
+        except Exception as e:
+            # Catch Postgrest permission denied (42501) cleanly
+            if "permission denied" in str(e).lower() or "42501" in str(e):
+                # Account deletion requires RPC or table grant in Supabase
+                return False
+            raise e

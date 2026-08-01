@@ -1,17 +1,20 @@
 # Receipt Logger Backend
 
-An AI-powered FastAPI backend service for receipt scanning, structured data extraction using **Google Gemini 3.6 Flash Vision AI**, RAG AI Chat assistant, session-scoped identity security, soft-delete data lifecycle management, and cloud database synchronization for the **Receipt Logger** mobile application.
+An AI-powered FastAPI backend service for receipt scanning, structured data extraction using **Google Gemini 3.6 Flash Vision AI**, RAG AI Chat assistant, session-scoped identity security, Backend Service Gateway database security, soft-delete data lifecycle management, and cloud database synchronization for the **Receipt Logger** mobile application.
 
 ---
 
 ## 🚀 Application Summary
 
-The **Receipt Logger Backend** provides high-speed, intelligent multimodal receipt parsing, conversational AI financial assistance, and secure data management for the privacy-first mobile client. It accepts receipt image uploads, processes them directly with Gemini 3.6 Flash Vision AI using strict structured Pydantic schemas, and returns validated JSON containing merchant info, line items, totals, dates, and categories in ~1.5 seconds. It also features a personalized RAG AI Chat assistant powered by Gemini 3.6 Flash, session-scoped CRUD & soft-delete endpoints, and cryptographic device fingerprint verification (`X-Device-Token`).
+The **Receipt Logger Backend** provides high-speed, intelligent multimodal receipt parsing, conversational AI financial assistance, and secure data management for the privacy-first mobile client. It accepts receipt image uploads, processes them directly with Gemini 3.6 Flash Vision AI using strict structured Pydantic schemas, and returns validated JSON containing merchant info, line items, totals, dates, and categories in ~1.5 seconds. It also features a personalized RAG AI Chat assistant powered by Gemini 3.6 Flash, session-scoped CRUD & soft-delete endpoints, cryptographic device fingerprint verification (`X-Device-Token`), and a locked-down Backend Service Gateway architecture in Supabase.
 
 ### Key Technology Stack
 - **Framework**: FastAPI (Python 3.10+) with Uvicorn ASGI server
 - **Auth & Security**: `src/Auth/` package (`Identity` model, `X-Device-Token` verification via constant-time `secrets.compare_digest`, ground-truth DB identity resolution)
-- **AI Extraction & Chat**: `google-genai` SDK (`gemini-3.6-flash` Multimodal Vision & RAG)
+- **Backend Service Gateway Architecture**: Supabase public `anon` access is **100% revoked/blocked**; FastAPI connects exclusively via the `service_role` key
+- **Database Migrations & RLS**: Idempotent SQL scripts in `migration/` (`00_teardown_all.sql`, `01_schema_tables.sql`, `02_indexes_triggers.sql`, `03_rls_policies.sql`, `04_grants_permissions.sql`)
+- **AI Extraction & Chat**: `google-genai` SDK (`gemini-3.6-flash` Multimodal Vision & RAG) with XML prompt boundary isolation
+- **Containerization**: Docker & Docker Compose (`docker-compose.yml`, `Dockerfile`, `.dockerignore`)
 - **Data Validation**: Pydantic v2 schemas (`Receipt`, `LineItem`, `ScanResponse`, `ReceiptRecord`, `UserRecord`, `DeviceRecord`, `ConversationRecord`, `ChatMessageRecord`)
 - **Cloud Database & Storage**: Supabase (`supabase-py` `AsyncClient`) for Postgres DB, Storage, and Vector search
 - **Architecture**: Layered Architecture with per-model repository pattern (`Receipts`, `Users`, `Devices`, `Conversations`)
@@ -23,6 +26,10 @@ The **Receipt Logger Backend** provides high-speed, intelligent multimodal recei
 ## ✨ Features Breakdown
 
 ### Implemented Features
+- **Backend Service Gateway & Supabase Security**:
+  - All public `anon` access to Supabase PostgREST is completely revoked (`REVOKE ALL ON ALL TABLES IN SCHEMA public FROM anon;`).
+  - Database access is restricted strictly to FastAPI via the secret `service_role` key (`SUPABASE_KEY`).
+  - Idempotent migration scripts provided in `migration/` with teardown/rollback capabilities (`00_teardown_all.sql`).
 - **Device Management & Soft-Delete** (`/api/v1/devices`):
   - `POST /api/v1/devices/register`: Idempotent registration of hardware `device_id` and secret `device_token`. Fails closed (`401`) on token mismatch.
   - `GET /api/v1/devices/me`: Retrieves current device registration record.
@@ -35,6 +42,7 @@ The **Receipt Logger Backend** provides high-speed, intelligent multimodal recei
   - `DELETE /api/v1/user/me`: Soft-deletes user account and automatically unlinks active device sessions to prevent zombie logins.
 - **Multimodal AI Receipt Extraction** (`POST /api/v1/scan/parse`):
   - Accepts multipart/form-data image uploads (`.png`, `.jpg`, `.jpeg`, `.webp`).
+  - Requires device identity headers (`X-Device-ID`, `X-Device-Token`) and enforces a 10MB file ceiling.
   - Directly feeds image bytes to Gemini 3.6 Flash with strict JSON schema enforcement.
   - Extracts merchant name, line items, subtotal, tax, total amount, currency, ISO 8601 date, raw OCR text, and category inference.
 - **Session-Scoped Receipt CRUD & Soft-Delete** (`/api/v1/receipts`):
@@ -44,10 +52,10 @@ The **Receipt Logger Backend** provides high-speed, intelligent multimodal recei
   - `POST /api/v1/receipts/batch`: Batch-creates up to 100 receipts bound to session identity.
   - `DELETE /api/v1/receipts/{receipt_id}`: Soft-deletes receipt by UUID (session ownership enforced).
 - **Personalized RAG AI Chat Assistant & Soft-Delete** (`/api/v1/chat`):
-  - `POST /api/v1/chat/create`: Creates a new AI conversation (enforces max 10 cap per identity).
+  - `POST /api/v1/chat/create`: Creates a new AI conversation (enforces max 10 cap per identity via PostgreSQL trigger).
   - `GET /api/v1/chat/list`: Lists conversations owned by session identity, newest first.
   - `GET /api/v1/chat/history`: Fetches chunked, paginated message history.
-  - `POST /api/v1/chat/query`: Sends query to Gemini 3.6 Flash using identity-scoped receipt history for RAG context.
+  - `POST /api/v1/chat/query`: Sends query to Gemini 3.6 Flash using identity-scoped receipt history for RAG context (protected with XML prompt boundary isolation).
   - `DELETE /api/v1/chat/{conversation_id}`: Soft-deletes a conversation by UUID (session ownership enforced).
 - **Explicit HTTP 422 Error Handling**: Custom exception handlers in `main.py` intercept any request payload schema mismatches or invalid data types and return clean `HTTP 422 Unprocessable Entity` responses.
 - **Health Check & Diagnostics** (`GET /api/v1/health/`): Returns API operational status and environment setting.

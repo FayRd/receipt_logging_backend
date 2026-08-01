@@ -1,9 +1,9 @@
 # Receipt Logger Backend — Project Structure & Directory Layout
 
 ## Overview
-The **Receipt Logger Backend** follows clean software architecture principles, separating concerns across Presentation (API Routers), Authentication & Session Resolution, Business Logic Services, Data Models/Schemas, Repository Data Accessors, and Infrastructure Data Providers.
+The **Receipt Logger Backend** follows clean software architecture principles, separating concerns across Presentation (API Routers), Authentication & Session Resolution, Business Logic Services, Data Models/Schemas, Repository Data Accessors, Infrastructure Data Providers, and Database Migrations.
 
-For full project scope and API specifications, see [PROJECT_SCOPE.md](file:///C:/mobile-development/receipt_logging_backend/PROJECT_SCOPE.md).
+For full project scope, threat model, and API specifications, see [PROJECT_SCOPE.md](file:///C:/mobile-development/receipt_logging_backend/PROJECT_SCOPE.md).
 
 ---
 
@@ -16,8 +16,19 @@ receipt_logging_backend/
 │   │   ├── security-advisor/   # Security Engineer & Vulnerability Auditor agent spec (agent.md)
 │   │   └── test-engineer/      # QA & Test Engineering agent spec (agent.md)
 │   └── skills/                 # Agent skills (FastAPI, RAG Chat, Supabase)
+├── .dockerignore               # Docker context exclusion rules
 ├── .env                        # Environment variable configuration (git-ignored)
+├── .gitignore                  # Git repository exclusion rules
+├── docker-compose.yml          # Standalone Docker Compose deployment manifest
+├── Dockerfile                  # Multi-stage Python 3.12-slim container image specification
 ├── main.py                     # FastAPI application entrypoint, middleware & exception handlers
+├── migration/                  # Supabase SQL Migration & RLS Scripts (git-ignored)
+│   ├── 00_teardown_all.sql     # Development reset & rollback script
+│   ├── 01_schema_tables.sql    # Idempotent table DDL (users, devices, receipts, chat)
+│   ├── 02_indexes_triggers.sql # Indexes, updated_at triggers, 10-chat cap & soft_delete_user RPC
+│   ├── 03_rls_policies.sql    # RLS enablement & service_role / authenticated policies
+│   ├── 04_grants_permissions.sql # Anon lockdown & service_role table DML grants
+│   └── README.md               # Migration execution & deployment guide
 ├── README.md                   # Project overview, setup, curl examples & execution guide
 ├── run.ps1                     # PowerShell launcher script (runs on port 8085)
 ├── requirements.txt            # Python dependencies (FastAPI, google-genai, Supabase, pytest)
@@ -53,7 +64,7 @@ receipt_logging_backend/
 │   │   ├── chat_service.py     # Gemini 3.6 Flash RAG AI Chat service
 │   │   └── extraction_service.py # Gemini 3.6 Flash Vision AI extraction service
 │   └── config.py               # Pydantic BaseSettings environment loader
-└── test/                       # Unit and integration test suite (37 tests)
+└── test/                       # Unit and integration test suite (46 tests)
     ├── conftest.py             # Shared pytest fixtures (TestClient, mock device, mock user)
     ├── test_chat.py            # AI Chat endpoint tests (create, list, history, query, cap)
     ├── test_devices.py         # Device registration, link & guest data migration tests
@@ -77,15 +88,18 @@ receipt_logging_backend/
    - Derives `user_id` strictly from database ground truth to prevent identity spoofing.
 
 3. **Services / Business Logic Layer (`src/Services/`)**:
-   - Houses AI prompt orchestration, Gemini 3.6 Flash Vision AI model calls, and RAG conversational search over logged receipts.
+   - Houses AI prompt orchestration, Gemini 3.6 Flash Vision AI model calls, and RAG conversational search over logged receipts with XML boundary isolation.
 
 4. **Models & Repositories (`src/Models/`)**:
    - Defines strict Pydantic models (`Receipt`, `LineItem`, `UserRecord`, `DeviceRecord`, `ConversationRecord`, `ChatMessageRecord`).
    - Grouped into model-specific repository directories (`Receipts`, `Users`, `Devices`, `Conversations`), encapsulating all direct Supabase `AsyncClient` queries, identity filtering, soft deletes (`deleted_at`), and guest data migration logic.
 
-5. **Infrastructure Layer (`src/Infrastructure/`)**:
-   - Manages external service connections using `acreate_client` for non-blocking async Supabase operations.
+5. **Database Migrations & Security Gateway (`migration/`)**:
+   - Contains SQL scripts implementing the Backend Service Gateway Architecture. Public `anon` access is revoked, and database access is granted strictly to `service_role` and `authenticated` roles.
 
-6. **Config & Lifespan (`src/config.py`, `main.py`)**:
+6. **Infrastructure Layer (`src/Infrastructure/`)**:
+   - Manages external service connections using `acreate_client` for non-blocking async Supabase operations via the `service_role` key.
+
+7. **Config & Lifespan (`src/config.py`, `main.py`)**:
    - Centralized environment setting management using Pydantic `BaseSettings` and FastAPI `lifespan` context manager.
    - Global exception handlers catching `RequestValidationError` and `ValidationError` to guarantee explicit HTTP 422 responses.

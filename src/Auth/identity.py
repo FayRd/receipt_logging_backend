@@ -91,13 +91,25 @@ async def get_current_identity(
 
 
 async def require_user_identity(
+    x_user_id: str | None = Header(
+        None,
+        alias="X-User-ID",
+        description="Authenticated user UUID string — required for user-scoped endpoints.",
+    ),
     identity: Identity = Depends(get_current_identity),
 ) -> Identity:
-    """FastAPI dependency for routes that REQUIRE a fully authenticated user session.
+    """FastAPI dependency for routes that REQUIRE a fully authenticated user session AND explicit X-User-ID header.
 
     Use this instead of get_current_identity on routes where guest access is not allowed.
-    Raises HTTP 401 if the caller is an anonymous guest device.
+    Raises HTTP 401 if X-User-ID header is missing/empty or if caller is an anonymous guest device.
     """
+    clean_user_id = x_user_id.strip() if x_user_id and x_user_id.strip() else None
+    if not clean_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Header X-User-ID is required for user-authenticated endpoints.",
+        )
+
     if not identity.is_authenticated:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

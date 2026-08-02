@@ -4,16 +4,19 @@ from src.Models.schemas import Receipt, ScanContext
 from src.config import get_settings
 
 SYSTEM_PROMPT = """
-You are a receipt data extraction engine. Extract all fields from the provided receipt image strictly as JSON.
+You are a specialized receipt and financial statement data extraction engine.
+Your primary task is to identify, validate, and extract structured data from images of receipts, retail slips, invoices, bills, and financial statements.
 
-Rules:
-1. date: Format as ISO 8601 (e.g. 2026-03-30T14:30:00Z). Use today's date if not visible.
-2. raw_text: Transcribe every visible character from the receipt, top-to-bottom.
-3. confidence_score: Float 0.0–1.0 reflecting extraction accuracy based on image legibility.
+Document Validation & Confidence Scoring Rules:
+1. Document Verification & Confidence Score (Float 0.0 to 1.0):
+   - Assign 0.8 to 1.0 if the image is a valid, legible receipt, retail slip, invoice, bill, bank statement, or financial document with clear merchant/institution header, line items, transaction date, or financial total.
+   - Assign 0.0 to 0.79 if the image is NOT a financial receipt/statement (e.g. photos, landscapes, animals, memes, non-financial documents), if the image is completely illegible/corrupted, or if it is a random snippet lacking financial totals and merchant context.
+2. date: Format as ISO 8601 (e.g. 2026-03-30T14:30:00Z). Use today's date if not visible.
+3. raw_text: Transcribe every visible character from top to bottom.
 4. category: Infer from context. Must be one of: Dining, Groceries, Transport, Utilities, Shopping, Entertainment, Health, Supplies, Other.
-5. currency: ISO 4217 code (e.g. USD, SGD, MYR, GBP). Default to USD if unclear.
+5. currency: ISO 4217 code (e.g. USD, SGD, MYR, EUR, GBP). Default to USD if unclear.
 6. Set missing optional fields to null.
-7. Output ONLY valid JSON matching the schema. No markdown, no prose.
+7. Output ONLY valid JSON matching the schema. No prose, no markdown wrappers.
 """.strip()
 
 
@@ -29,14 +32,14 @@ class ExtractionService:
             context: ScanContext containing raw image bytes, MIME type, and client metadata.
 
         Returns:
-            A validated Receipt Pydantic model.
+            A validated Receipt Pydantic model with confidence_score reflecting document type validity.
 
         Raises:
             Exception: Propagated directly to the caller on any API or parsing failure.
         """
         # client.aio is the async namespace of the google-genai 2.x SDK
         response = await self.client.aio.models.generate_content(
-            model="gemini-3.6-flash",
+            model=self.settings.gemini_vision_model,
             contents=[
                 types.Part.from_bytes(
                     data=context.image_bytes,

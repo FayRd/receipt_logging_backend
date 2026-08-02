@@ -3,11 +3,10 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, s
 from src.Auth.identity import Identity, get_current_identity
 from src.Models.schemas import ScanContext, ScanResponse
 from src.Services.extraction_service import ExtractionService
+from src.config import get_settings
 
 router = APIRouter(prefix="/scan", tags=["Scanning"])
 logger = logging.getLogger("receipt_scanner")
-
-MAX_IMAGE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB file size ceiling
 
 
 async def get_extraction_service() -> ExtractionService:
@@ -16,23 +15,25 @@ async def get_extraction_service() -> ExtractionService:
 
 @router.post("/parse", response_model=ScanResponse)
 async def parse_receipt(
-    image: UploadFile = File(..., description="Receipt image file (JPEG, PNG, WEBP, etc.)"),
+    image: UploadFile = File(..., description="Receipt or financial statement image file (JPEG, PNG, WEBP, etc.)"),
     identity: Identity = Depends(get_current_identity),
     service: ExtractionService = Depends(get_extraction_service),
 ) -> ScanResponse:
-    """Accept a multipart receipt image upload and return AI-extracted structured data.
+    """Accept a multipart receipt/financial statement image upload and return AI-extracted structured data.
 
     Requires device authentication (X-Device-ID and X-Device-Token).
-    Enforces a 10MB maximum upload ceiling and safe exception handling.
+    Enforces dynamic upload size ceiling and document validation confidence threshold from settings.
     """
+    settings = get_settings()
+
     try:
         image_bytes = await image.read()
 
         # Enforce maximum upload ceiling to prevent DoS & memory exhaustion
-        if len(image_bytes) > MAX_IMAGE_SIZE_BYTES:
+        if len(image_bytes) > settings.max_image_size_bytes:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Image file size exceeds maximum limit of 10MB.",
+                detail=f"Image file size exceeds maximum limit of {settings.max_image_size_bytes // (1024 * 1024)}MB.",
             )
 
         content_type = image.content_type or "image/jpeg"
@@ -45,6 +46,18 @@ async def parse_receipt(
         )
 
         receipt = await service.extract_from_image(context)
+
+        # Enforce document validation threshold (must be >= confidence_threshold for valid receipts / financial statements)
+        if receipt.confidence_score < settings.confidence_threshold:
+            return ScanResponse(
+                success=False,
+                data=None,
+                error=(
+                    f"Invalid document type. The uploaded image does not appear to be a valid receipt or "
+                    f"financial statement (confidence score {receipt.confidence_score:.2f} is below the {settings.confidence_threshold} threshold)."
+                ),
+            )
+
         return ScanResponse(success=True, data=receipt, error=None)
 
     except HTTPException as he:

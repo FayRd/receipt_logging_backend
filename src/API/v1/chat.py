@@ -37,11 +37,14 @@ async def create_conversation(
     Enforces a hard cap of 10 active conversations per user/device identity.
     Returns HTTP 400 when the limit is reached.
     """
+    from src.config import get_settings
+
+    settings = get_settings()
     current_count = await repo.count_conversations(identity)
-    if current_count >= repo.MAX_CONVERSATIONS_PER_IDENTITY:
+    if current_count >= settings.max_conversations_per_identity:
         raise HTTPException(
             status_code=400,
-            detail="Maximum limit of 10 conversations reached for this user/device identity.",
+            detail=f"Maximum limit of {settings.max_conversations_per_identity} conversations reached for this user/device identity.",
         )
     data = await repo.create_conversation(identity, body.title)
     return data

@@ -39,14 +39,14 @@ class ChatService:
     ) -> str:
         """Retrieve identity-scoped receipts for RAG context and call Gemini 3.6 Flash.
 
-        1. Fetches the caller's 30 most recent receipts via ReceiptRepository.
+        1. Fetches the caller's recent receipts via ReceiptRepository up to rag_recent_receipts_limit.
         2. Builds a structured XML-bounded context block listing date, merchant, category, amount.
-        3. Appends last 10 turns of conversation history.
-        4. Asynchronously calls Gemini 3.6 Flash and returns the stripped response text.
+        3. Appends last rag_history_messages_limit turns of conversation history.
+        4. Asynchronously calls Gemini chat model and returns the stripped response text.
         """
         # 1. Fetch caller's recent receipts for RAG context
         all_receipts = await self.receipt_repo.get_all_by_identity(identity)
-        recent_receipts = all_receipts[:30]
+        recent_receipts = all_receipts[: self.settings.rag_recent_receipts_limit]
 
         # 2. Format receipt context string with prompt injection guards
         context_lines = []
@@ -66,7 +66,12 @@ class ChatService:
         formatted_contents = [
             types.Part.from_text(text=f"{CHAT_SYSTEM_PROMPT}\n\n{context_block}")
         ]
-        for m in history_messages[-10:]:  # last 10 turns for context window
+        history_window = (
+            history_messages[-self.settings.rag_history_messages_limit :]
+            if self.settings.rag_history_messages_limit > 0
+            else history_messages
+        )
+        for m in history_window:
             role_prefix = "User: " if m["sender"] == "user" else "Assistant: "
             sanitized_content = self._sanitize_string(m["content"])
             formatted_contents.append(
@@ -76,9 +81,9 @@ class ChatService:
         sanitized_user_msg = self._sanitize_string(user_message)
         formatted_contents.append(types.Part.from_text(text=f"User: {sanitized_user_msg}"))
 
-        # 4. Asynchronously invoke Gemini 3.6 Flash
+        # 4. Asynchronously invoke Gemini Chat model
         response = await self.client.aio.models.generate_content(
-            model="gemini-3.6-flash",
+            model=self.settings.gemini_chat_model,
             contents=formatted_contents,
         )
         return response.text.strip()

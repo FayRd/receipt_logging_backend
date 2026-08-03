@@ -17,6 +17,14 @@ The **Receipt Logger Backend** is an AI-powered REST API built with **FastAPI**,
                                     │
                                     ▼
 ┌────────────────────────────────────────────────────────────────────────┐
+│          Identity-Keyed Sliding Window Rate Limiter (rate_limit)       │
+│  - Vision Scan: 5 req/min    - AI Chat: 10 req/min                    │
+│  - Auth/Register: 10 req/min  - CRUD: 60 req/min                       │
+│  - Triggers HTTP 429 Too Many Requests with Retry-After header         │
+└───────────────────────────────────┬────────────────────────────────────┘
+                                    │
+                                    ▼
+┌────────────────────────────────────────────────────────────────────────┐
 │               FastAPI Security Dependency: get_current_identity        │
 │ 1. Validates X-Device-Token against devices table (secrets.compare_digest)│
 │ 2. Derives true user_id strictly from database ground truth            │
@@ -31,7 +39,7 @@ The **Receipt Logger Backend** is an AI-powered REST API built with **FastAPI**,
 │ POST /scan/parse     │  │ GET  /receipts/      │  │ POST /chat/create    │
 │ Gemini 3.6 Flash     │  │ POST /receipts/      │  │ GET  /chat/list      │
 │ Vision AI            │  │ GET  /user/me        │  │ GET  /chat/history   │
-│ Structured JSON      │  │ DELETE /user/me      │  │ POST /chat/query     │
+│ Confidence >= 0.8    │  │ DELETE /user/me      │  │ POST /chat/query     │
 └──────────────────────┘  │ GET  /devices/me     │  │ DELETE /chat/{id}    │
                           │ DELETE /devices/me   │  └──────────────────────┘
                           │ POST /devices/link   │
@@ -42,28 +50,28 @@ The **Receipt Logger Backend** is an AI-powered REST API built with **FastAPI**,
 
 ## API Endpoints & Implementation Status
 
-| # | Endpoint Route | HTTP Method | Header Requirements | Description & Core Logic | Implementation Status |
-|---|---|---|---|---|---|
-| 1 | `/api/v1/health/` | `GET` | None | Health check, environment details, system status | **Implemented** |
-| 2 | `/api/v1/devices/register` | `POST` | None | Idempotent device registration & fingerprint token refresh | **Implemented** |
-| 3 | `/api/v1/devices/me` | `GET` | `X-Device-ID`, `X-Device-Token` | Retrieves device registration record for current hardware ID | **Implemented** |
-| 4 | `/api/v1/devices/me` | `DELETE` | `X-Device-ID`, `X-Device-Token` | Soft-deletes calling device record (`deleted_at = now()`) | **Implemented** |
-| 5 | `/api/v1/devices/link` | `POST` | `X-Device-ID`, `X-Device-Token` | Links device to user account & migrates orphan guest data | **Implemented** |
-| 6 | `/api/v1/user/create` | `POST` | None | Public registration for new user account (PBKDF2 password hash) | **Implemented** |
-| 7 | `/api/v1/user/login` | `POST` | None | Public user login authentication | **Implemented** |
-| 8 | `/api/v1/user/me` | `GET` | `X-Device-ID`, `X-Device-Token` | Retrieves authenticated user profile (requires user session) | **Implemented** |
-| 9 | `/api/v1/user/me` | `DELETE` | `X-Device-ID`, `X-Device-Token` | Soft-deletes user account & unlinks all active devices | **Implemented** |
-| 10 | `/api/v1/scan/parse` | `POST` | `X-Device-ID`, `X-Device-Token` | Multimodal AI parsing via Gemini 3.6 Flash (10MB ceiling) | **Implemented** |
-| 11 | `/api/v1/receipts/` | `GET` | `X-Device-ID`, `X-Device-Token` | Gets all non-deleted receipts owned by session identity | **Implemented** |
-| 12 | `/api/v1/receipts/{receipt_id}` | `GET` | `X-Device-ID`, `X-Device-Token` | Gets single receipt by UUID (session ownership enforced) | **Implemented** |
-| 13 | `/api/v1/receipts/` | `POST` | `X-Device-ID`, `X-Device-Token` | Creates a receipt record bound to session identity | **Implemented** |
-| 14 | `/api/v1/receipts/batch` | `POST` | `X-Device-ID`, `X-Device-Token` | Batch creates up to 100 receipts bound to session identity | **Implemented** |
-| 15 | `/api/v1/receipts/{receipt_id}` | `DELETE` | `X-Device-ID`, `X-Device-Token` | Soft-deletes receipt by UUID (session ownership enforced) | **Implemented** |
-| 16 | `/api/v1/chat/create` | `POST` | `X-Device-ID`, `X-Device-Token` | Creates new AI conversation (max 10 limit per identity) | **Implemented** |
-| 17 | `/api/v1/chat/list` | `GET` | `X-Device-ID`, `X-Device-Token` | Lists conversations owned by session identity | **Implemented** |
-| 18 | `/api/v1/chat/history` | `GET` | `X-Device-ID`, `X-Device-Token` | Gets conversation message history (chunked limits) | **Implemented** |
-| 19 | `/api/v1/chat/query` | `POST` | `X-Device-ID`, `X-Device-Token` | Conversational AI query over receipt history with RAG | **Implemented** |
-| 20 | `/api/v1/chat/{conversation_id}` | `DELETE` | `X-Device-ID`, `X-Device-Token` | Soft-deletes conversation by UUID (session ownership enforced) | **Implemented** |
+| # | Endpoint Route | HTTP Method | Rate Limit (req/min) | Header Requirements | Description & Core Logic | Implementation Status |
+|---|---|---|---|---|---|---|
+| 1 | `/api/v1/health/` | `GET` | 120 | None | Health check, environment details, system status | **Implemented** |
+| 2 | `/api/v1/devices/register` | `POST` | 10 | None | Idempotent device registration & fingerprint token refresh | **Implemented** |
+| 3 | `/api/v1/devices/me` | `GET` | 60 | `X-Device-ID`, `X-Device-Token` | Retrieves device registration record for current hardware ID | **Implemented** |
+| 4 | `/api/v1/devices/me` | `DELETE` | 60 | `X-Device-ID`, `X-Device-Token` | Soft-deletes calling device record (`deleted_at = now()`) | **Implemented** |
+| 5 | `/api/v1/devices/link` | `POST` | 10 | `X-Device-ID`, `X-Device-Token` | Links device to user account & migrates orphan guest data | **Implemented** |
+| 6 | `/api/v1/user/create` | `POST` | 10 | None | Public registration for new user account (PBKDF2 password hash) | **Implemented** |
+| 7 | `/api/v1/user/login` | `POST` | 10 | None | Public user login authentication | **Implemented** |
+| 8 | `/api/v1/user/me` | `GET` | 60 | `X-Device-ID`, `X-Device-Token` | Retrieves authenticated user profile (requires user session) | **Implemented** |
+| 9 | `/api/v1/user/me` | `DELETE` | 60 | `X-Device-ID`, `X-Device-Token` | Soft-deletes user account & unlinks all active devices | **Implemented** |
+| 10 | `/api/v1/scan/parse` | `POST` | 5 | `X-Device-ID`, `X-Device-Token` | Multimodal AI parsing via Gemini 3.6 Flash (10MB ceiling, >=0.8 confidence) | **Implemented** |
+| 11 | `/api/v1/receipts/` | `GET` | 60 | `X-Device-ID`, `X-Device-Token` | Gets all non-deleted receipts owned by session identity | **Implemented** |
+| 12 | `/api/v1/receipts/{receipt_id}` | `GET` | 60 | `X-Device-ID`, `X-Device-Token` | Gets single receipt by UUID (session ownership enforced) | **Implemented** |
+| 13 | `/api/v1/receipts/` | `POST` | 60 | `X-Device-ID`, `X-Device-Token` | Creates a receipt record bound to session identity | **Implemented** |
+| 14 | `/api/v1/receipts/batch` | `POST` | 60 | `X-Device-ID`, `X-Device-Token` | Batch creates up to 100 receipts bound to session identity | **Implemented** |
+| 15 | `/api/v1/receipts/{receipt_id}` | `DELETE` | 60 | `X-Device-ID`, `X-Device-Token` | Soft-deletes receipt by UUID (session ownership enforced) | **Implemented** |
+| 16 | `/api/v1/chat/create` | `POST` | 60 | `X-Device-ID`, `X-Device-Token` | Creates new AI conversation (max 10 limit per identity) | **Implemented** |
+| 17 | `/api/v1/chat/list` | `GET` | 60 | `X-Device-ID`, `X-Device-Token` | Lists conversations owned by session identity | **Implemented** |
+| 18 | `/api/v1/chat/history` | `GET` | 60 | `X-Device-ID`, `X-Device-Token` | Gets conversation message history (chunked limits) | **Implemented** |
+| 19 | `/api/v1/chat/query` | `POST` | 10 | `X-Device-ID`, `X-Device-Token` | Conversational AI query over receipt history with RAG | **Implemented** |
+| 20 | `/api/v1/chat/{conversation_id}` | `DELETE` | 60 | `X-Device-ID`, `X-Device-Token` | Soft-deletes conversation by UUID (session ownership enforced) | **Implemented** |
 
 ---
 
@@ -71,25 +79,30 @@ The **Receipt Logger Backend** is an AI-powered REST API built with **FastAPI**,
 
 The Receipt Logger Backend enforces a multi-layered defense-in-depth security model:
 
-### 1. Backend Service Gateway Model (Supabase Public Access Lockdown)
+### 1. Identity-Keyed Sliding Window Rate Limiter (`src/Auth/rate_limiter.py`)
+- **Sliding Window Counter**: High-precision rolling window rate limiter that eliminates clock boundary burst attacks.
+- **Identity Isolation**: Rate limits are keyed by `X-Device-ID` (with fallback to client IP), ensuring mobile devices on shared NAT/Wi-Fi networks do not throttle each other.
+- **Standard HTTP 429 Response**: Returns `Retry-After`, `X-RateLimit-Limit`, and `X-RateLimit-Remaining` HTTP response headers.
+
+### 2. Backend Service Gateway Model (Supabase Public Access Lockdown)
 - **Zero Public PostgREST Access**: Public `anon` access to Supabase is **100% revoked and blocked** (`REVOKE ALL ON ALL TABLES IN SCHEMA public FROM anon;`). Any direct HTTP query to Supabase PostgREST using the `anon` key is rejected immediately (`42501 Permission Denied`).
 - **Single Trusted Gateway**: The database can **only** be accessed via the FastAPI backend using the secret `service_role` key (`SUPABASE_KEY`) or through the private Supabase Web Dashboard.
 
-### 2. Header-Based Ground-Truth Identity Resolution (`src/Auth/identity.py`)
+### 3. Header-Based Ground-Truth Identity Resolution (`src/Auth/identity.py`)
 - **Constant-Time Token Comparison**: Device authentication compares client-supplied `X-Device-Token` against stored tokens using `secrets.compare_digest` to prevent cryptographic timing attacks.
 - **Ground-Truth User Derivation**: Caller `user_id` is derived strictly from database records (`device.user_id`). Client-supplied `X-User-ID` headers are validated against ground truth and rejected (`401 Unauthorized`) on mismatch, preventing identity spoofing.
 
-### 3. Database Row-Level Security (RLS) & Atomic Triggers (`migration/`)
+### 4. Database Row-Level Security (RLS) & Atomic Triggers (`migration/`)
 - **RLS Across All Tables**: All 5 tables (`users`, `devices`, `receipts`, `conversations`, `chat_messages`) have RLS enabled (`ALTER TABLE ... ENABLE ROW LEVEL SECURITY;`) with explicit policies for `service_role` and `authenticated`.
 - **Atomic 10-Conversation Cap**: Enforced at the PostgreSQL level via `BEFORE INSERT` trigger function (`enforce_max_conversations()`), preventing TOCTOU race conditions.
 - **Cascading Session Termination**: User deletion (`DELETE /user/me`) executes `soft_delete_user` `SECURITY DEFINER` RPC function, setting `users.deleted_at = now()` and clearing `devices.user_id = NULL` to immediately terminate active sessions.
 
-### 4. AI & Prompt Injection Hardening (`src/Services/`)
+### 5. AI & Prompt Injection Hardening (`src/Services/`)
 - **XML Boundary Isolation**: RAG receipt context is enclosed in XML tags (`<receipt_context> ... </receipt_context>`) with strict instructions to treat inner text as data, preventing prompt injection tag-breakout.
+- **Document Type Validation**: `POST /scan/parse` requires Gemini 3.6 Flash `confidence_score >= 0.8` for receipts/financial statements before parsing.
 - **Input Sanitization**: User messages and receipt merchant strings are sanitized (`<` and `>` escaped).
-- **Log Sanitation**: Sensitive financial history is never logged to standard output (`stdout`) logs.
 
-### 5. Network & DoS Protection (`main.py`, `src/API/v1/scan.py`)
+### 6. Network & DoS Protection (`main.py`, `src/API/v1/scan.py`)
 - **Restricted CORS Policy**: CORS allows only localhost (`127.0.0.1`), local network IPs (`192.168.x.x`, `10.x.x.x`), and Tailscale domains (`100.x.x.x`, `*.ts.net`).
 - **File Upload Ceiling**: `POST /api/v1/scan/parse` requires device identity and enforces a 10MB upload ceiling to prevent credit exhaustion DoS.
 
@@ -120,13 +133,14 @@ The Receipt Logger Backend enforces a multi-layered defense-in-depth security mo
 - **`404 Not Found`**: Resource does not exist, already deleted, or not owned by calling identity.
 - **`409 Conflict`**: Username already taken on registration.
 - **`422 Unprocessable Entity`**: Payload schema validation mismatch or malformed JSON data.
+- **`429 Too Many Requests`**: Rate limit exceeded (includes `Retry-After`, `X-RateLimit-Limit`, `X-RateLimit-Remaining` headers).
 
 ---
 
 ## Technology Stack
 
 - **Framework**: FastAPI 0.140+ with Uvicorn ASGI server
-- **Authentication & Security**: `src/Auth/` package (`Identity` model, `get_current_identity` dependency, constant-time `secrets.compare_digest` device token verification, DB ground-truth identity resolution)
+- **Authentication & Rate Limiting**: `src/Auth/` package (`Identity` model, `get_current_identity` dependency, `SlidingWindowRateLimiter` engine, constant-time `secrets.compare_digest` device token verification)
 - **Backend Service Gateway Architecture**: Supabase `anon` access revoked; FastAPI connects via `service_role` key
 - **Database Migrations & RLS**: Idempotent SQL scripts in `migration/` (`00_teardown_all.sql`, `01_schema_tables.sql`, `02_indexes_triggers.sql`, `03_rls_policies.sql`, `04_grants_permissions.sql`)
 - **AI / LLM Engine**: `google-genai` SDK (`gemini-3.6-flash` Vision & RAG) with XML prompt boundary isolation
@@ -134,5 +148,5 @@ The Receipt Logger Backend enforces a multi-layered defense-in-depth security mo
 - **Data Validation**: Pydantic v2 schemas (`Receipt`, `LineItem`, `ScanResponse`, `ReceiptRecord`, `UserRecord`, `DeviceRecord`, `ConversationRecord`, `ChatMessageRecord`)
 - **Database & Cloud Storage**: Supabase (`supabase-py`) `AsyncClient` for Postgres DB, Storage Buckets, and `pgvector`
 - **Architecture Pattern**: Thin Routers + Repository Pattern per Model (`Receipts`, `Users`, `Devices`, `Conversations`)
-- **Testing & Quality Assurance**: Automated Pytest suite (46 tests in `test/`) with `test-engineer` subagent and `security-advisor` vulnerability auditor
+- **Testing & Quality Assurance**: Automated Pytest suite (54 tests in `test/`) with `test-engineer` subagent and `security-advisor` vulnerability auditor
 - **Configuration**: Pydantic `BaseSettings` (`python-dotenv`)

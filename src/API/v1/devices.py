@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from supabase import AsyncClient
 from src.Infrastructure.database import get_supabase_client
 from src.Auth.identity import Identity, get_current_identity
+from src.Auth.rate_limiter import rate_limit
 from src.Models.schemas import (
     DeviceRegisterRequest,
     DeviceLinkRequest,
@@ -17,9 +18,12 @@ async def get_repo(db: AsyncClient = Depends(get_supabase_client)) -> DeviceRepo
 
 
 # ── POST /devices/register ────────────────────────────────────────────────────
-# NOTE: This is an unauthenticated bootstrap endpoint — the device cannot send
-# X-Device-Token before registration, so we do not apply get_current_identity here.
-@router.post("/register", response_model=DeviceRecord, status_code=201)
+@router.post(
+    "/register",
+    response_model=DeviceRecord,
+    status_code=201,
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_auth_per_minute))],
+)
 async def register_device(
     body: DeviceRegisterRequest,
     repo: DeviceRepository = Depends(get_repo),
@@ -27,8 +31,7 @@ async def register_device(
     """Register a new device hardware ID and fingerprint token, or refresh an existing one.
 
     Idempotent — calling with the same device_id updates the token and user association.
-    This endpoint is intentionally public (no auth dependency) because the device
-    needs to bootstrap itself before it can present a valid X-Device-Token.
+    Rate limited to protect against device registration spam.
     """
     device = await repo.register_or_update(body)
     if not device:
@@ -40,9 +43,11 @@ async def register_device(
 
 
 # ── GET /devices/me ───────────────────────────────────────────────────────────
-# NOTE: Must be declared BEFORE /{device_id} to prevent FastAPI treating
-# the literal string "me" as a device_id path parameter.
-@router.get("/me", response_model=DeviceRecord)
+@router.get(
+    "/me",
+    response_model=DeviceRecord,
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_crud_per_minute))],
+)
 async def get_my_device(
     identity: Identity = Depends(get_current_identity),
     repo: DeviceRepository = Depends(get_repo),
@@ -58,7 +63,11 @@ async def get_my_device(
 
 
 # ── POST /devices/link ────────────────────────────────────────────────────────
-@router.post("/link", response_model=DeviceRecord)
+@router.post(
+    "/link",
+    response_model=DeviceRecord,
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_auth_per_minute))],
+)
 async def link_device_user(
     body: DeviceLinkRequest,
     identity: Identity = Depends(get_current_identity),
@@ -85,7 +94,11 @@ async def link_device_user(
 
 
 # ── DELETE /devices/me ────────────────────────────────────────────────────────
-@router.delete("/me", status_code=200)
+@router.delete(
+    "/me",
+    status_code=200,
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_crud_per_minute))],
+)
 async def delete_my_device(
     identity: Identity = Depends(get_current_identity),
     repo: DeviceRepository = Depends(get_repo),

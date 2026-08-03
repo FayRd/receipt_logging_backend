@@ -32,6 +32,14 @@ class Settings(BaseSettings):
     rag_history_messages_limit: int = 10          # Message turns context window
     max_conversations_per_identity: int = 10      # Active conversation hard cap
 
+    # Rate Limiting Configuration
+    rate_limit_enabled: bool = True
+    rate_limit_scan_per_minute: int = 5           # Heavy Vision AI parsing
+    rate_limit_chat_per_minute: int = 10          # AI Chat & RAG queries
+    rate_limit_auth_per_minute: int = 10          # User & Device auth endpoints
+    rate_limit_crud_per_minute: int = 60          # Standard session CRUD
+    rate_limit_health_per_minute: int = 120       # Health check route
+
 
 @lru_cache
 def get_settings() -> Settings:

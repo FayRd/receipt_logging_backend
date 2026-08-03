@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from supabase import AsyncClient
 from src.Infrastructure.database import get_supabase_client
 from src.Auth.identity import Identity, get_current_identity, require_user_identity
+from src.Auth.rate_limiter import rate_limit
 from src.Models.schemas import (
     UserCreateRequest,
     UserLoginRequest,
@@ -18,14 +19,19 @@ async def get_repo(db: AsyncClient = Depends(get_supabase_client)) -> UserReposi
 
 
 # ── POST /user/create ─────────────────────────────────────────────────────────
-@router.post("/create", response_model=UserRecord, status_code=201)
+@router.post(
+    "/create",
+    response_model=UserRecord,
+    status_code=201,
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_auth_per_minute))],
+)
 async def create_user(
     body: UserCreateRequest,
     repo: UserRepository = Depends(get_repo),
 ):
     """Register a new user account. Rejects duplicate usernames (case-insensitive).
 
-    This is an unauthenticated public endpoint — no device token required.
+    This is an unauthenticated public endpoint — rate limited to protect against registration spam.
     """
     existing = await repo.get_by_username(body.username)
     if existing:
@@ -36,17 +42,18 @@ async def create_user(
 
 
 # ── POST /user/login ──────────────────────────────────────────────────────────
-@router.post("/login", response_model=UserLoginResponse)
+@router.post(
+    "/login",
+    response_model=UserLoginResponse,
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_auth_per_minute))],
+)
 async def login_user(
     body: UserLoginRequest,
     repo: UserRepository = Depends(get_repo),
 ):
     """Authenticate user credentials and return sanitized user profile.
 
-    This is an unauthenticated public endpoint — no device token required.
-    The client sends a pre-encrypted password string. The backend applies
-    server-side PBKDF2/SHA-256 on top before comparing against the stored hash,
-    preventing pass-the-hash attacks.
+    Rate limited to protect against brute-force password guessing attacks.
     """
     user = await repo.get_by_username(body.username)
     # Identical error for missing user AND wrong password — prevents username enumeration
@@ -62,7 +69,11 @@ async def login_user(
 
 
 # ── GET /user/me ──────────────────────────────────────────────────────────────
-@router.get("/me", response_model=UserRecord)
+@router.get(
+    "/me",
+    response_model=UserRecord,
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_crud_per_minute))],
+)
 async def get_my_profile(
     identity: Identity = Depends(require_user_identity),
     repo: UserRepository = Depends(get_repo),
@@ -79,7 +90,11 @@ async def get_my_profile(
 
 
 # ── DELETE /user/me ───────────────────────────────────────────────────────────
-@router.delete("/me", status_code=200)
+@router.delete(
+    "/me",
+    status_code=200,
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_crud_per_minute))],
+)
 async def delete_my_profile(
     identity: Identity = Depends(require_user_identity),
     repo: UserRepository = Depends(get_repo),

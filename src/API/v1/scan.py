@@ -1,6 +1,7 @@
 import logging
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
 from src.Auth.identity import Identity, get_current_identity
+from src.Auth.rate_limiter import rate_limit
 from src.Models.schemas import ScanContext, ScanResponse
 from src.Services.extraction_service import ExtractionService
 from src.config import get_settings
@@ -13,7 +14,11 @@ async def get_extraction_service() -> ExtractionService:
     return ExtractionService()
 
 
-@router.post("/parse", response_model=ScanResponse)
+@router.post(
+    "/parse",
+    response_model=ScanResponse,
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_scan_per_minute))],
+)
 async def parse_receipt(
     image: UploadFile = File(..., description="Receipt or financial statement image file (JPEG, PNG, WEBP, etc.)"),
     identity: Identity = Depends(get_current_identity),
@@ -22,7 +27,7 @@ async def parse_receipt(
     """Accept a multipart receipt/financial statement image upload and return AI-extracted structured data.
 
     Requires device authentication (X-Device-ID and X-Device-Token).
-    Enforces dynamic upload size ceiling and document validation confidence threshold from settings.
+    Enforces dynamic upload size ceiling, document validation confidence threshold, and rate limits.
     """
     settings = get_settings()
 

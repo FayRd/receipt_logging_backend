@@ -1,7 +1,7 @@
 # Receipt Logger Backend — Project Structure & Directory Layout
 
 ## Overview
-The **Receipt Logger Backend** follows clean software architecture principles, separating concerns across Presentation (API Routers), Authentication & Session Resolution, Business Logic Services, Data Models/Schemas, Repository Data Accessors, Infrastructure Data Providers, and Database Migrations.
+The **Receipt Logger Backend** follows clean software architecture principles, separating concerns across Presentation (API Routers), Authentication & Rate Limiting, Business Logic Services, Data Models/Schemas, Repository Data Accessors, Infrastructure Data Providers, and Database Migrations.
 
 For full project scope, threat model, and API specifications, see [PROJECT_SCOPE.md](file:///C:/mobile-development/receipt_logging_backend/PROJECT_SCOPE.md).
 
@@ -41,9 +41,10 @@ receipt_logging_backend/
 │   │       ├── receipts.py     # Session-scoped Receipt CRUD routes
 │   │       ├── scan.py         # Image upload & Gemini 3.6 Flash Vision parsing
 │   │       └── user.py         # User registration, login & session-scoped /me route
-│   ├── Auth/                   # Authentication & Session Identity Resolution
+│   ├── Auth/                   # Authentication & Rate Limiting Engine
 │   │   ├── __init__.py         # Package marker
-│   │   └── identity.py         # Identity model, get_current_identity, require_user_identity
+│   │   ├── identity.py         # Identity model, get_current_identity, require_user_identity
+│   │   └── rate_limiter.py     # SlidingWindowRateLimiter engine & rate_limit dependency factory
 │   ├── Infrastructure/         # External System Integration Layer
 │   │   └── database.py         # Supabase AsyncClient dependency provider
 │   ├── Models/                 # Data Layer (Pydantic Schemas & Repositories per Model)
@@ -63,14 +64,16 @@ receipt_logging_backend/
 │   ├── Services/               # Business Logic Layer
 │   │   ├── chat_service.py     # Gemini 3.6 Flash RAG AI Chat service
 │   │   └── extraction_service.py # Gemini 3.6 Flash Vision AI extraction service
-│   └── config.py               # Pydantic BaseSettings environment loader
-└── test/                       # Unit and integration test suite (46 tests)
+│   └── config.py               # Pydantic BaseSettings environment & rate limit loader
+└── test/                       # Unit and integration test suite (54 tests)
     ├── conftest.py             # Shared pytest fixtures (TestClient, mock device, mock user)
     ├── test_chat.py            # AI Chat endpoint tests (create, list, history, query, cap)
     ├── test_devices.py         # Device registration, link & guest data migration tests
     ├── test_errors.py          # HTTP 401, 404, 422 error handling tests
     ├── test_health.py          # Health check status tests
+    ├── test_rate_limiter.py    # Rate limiter breach & HTTP 429 header tests
     ├── test_receipts.py        # Receipt CRUD & batch insertion tests
+    ├── test_scan.py            # Vision AI parsing, confidence score & file limit tests
     └── test_user.py            # User creation, login & profile tests
 ```
 
@@ -80,12 +83,13 @@ receipt_logging_backend/
 
 1. **API / Presentation Layer (`src/API/v1/`)**:
    - Handles incoming HTTP requests, file uploads, parameter validation, and HTTP status codes.
-   - Thin routers that delegate identity resolution to `src/Auth/` and data persistence to repositories using FastAPI dependency injection (`Depends`).
+   - Thin routers that delegate identity resolution and rate limiting to `src/Auth/` and data persistence to repositories using FastAPI dependency injection (`Depends`).
 
-2. **Authentication & Identity Resolution (`src/Auth/`)**:
+2. **Authentication & Rate Limiting (`src/Auth/`)**:
    - Parses `X-Device-ID`, `X-Device-Token`, and `X-User-ID` headers.
    - Performs constant-time cryptographic verification (`secrets.compare_digest`) against stored `device_token`.
    - Derives `user_id` strictly from database ground truth to prevent identity spoofing.
+   - Enforces Sliding Window Counter rate limits keyed by identity/IP with standard `HTTP 429` headers (`Retry-After`).
 
 3. **Services / Business Logic Layer (`src/Services/`)**:
    - Houses AI prompt orchestration, Gemini 3.6 Flash Vision AI model calls, and RAG conversational search over logged receipts with XML boundary isolation.
@@ -101,5 +105,5 @@ receipt_logging_backend/
    - Manages external service connections using `acreate_client` for non-blocking async Supabase operations via the `service_role` key.
 
 7. **Config & Lifespan (`src/config.py`, `main.py`)**:
-   - Centralized environment setting management using Pydantic `BaseSettings` and FastAPI `lifespan` context manager.
+   - Centralized environment setting and rate limit configuration using Pydantic `BaseSettings`.
    - Global exception handlers catching `RequestValidationError` and `ValidationError` to guarantee explicit HTTP 422 responses.

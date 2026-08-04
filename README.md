@@ -22,7 +22,7 @@ The **Receipt Logger Backend** provides high-speed, intelligent multimodal recei
 - **Configuration**: Pydantic `BaseSettings` & `python-dotenv`
 
 ---
-
+V
 ## ✨ Features Breakdown
 
 ### Implemented Features

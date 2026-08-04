@@ -1,21 +1,42 @@
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
+import redis.asyncio as aioredis
+from google import genai
 from src.config import get_settings
-from src.API.v1 import health, scan, receipts, user, devices, chat
+from src.API.v1 import health, scan, receipts, user, devices, chat, bulk
 
+redis_client: aioredis.Redis | None = None
+genai_client: genai.Client | None = None
+
+
+# ── PHASE 2: LIFESPAN INTEGRATION ─────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup
+    global redis_client, genai_client
     settings = get_settings()
     print(f"Starting Receipt API in {settings.environment} mode")
+
+    # Initialize Async Redis client
+    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/1")
+    redis_client = aioredis.from_url(redis_url, decode_responses=True)
+
+    # Initialize Google Gen AI async client
+    genai_client = genai.Client(api_key=settings.gemini_api_key)
+
+    # Pass clients to bulk router module
+    bulk.init_bulk_clients(redis_client, genai_client)
+
     yield
-    # Shutdown
+
     print("Shutting down Receipt API")
+    if redis_client:
+        await redis_client.aclose()
 
 
 app = FastAPI(
@@ -87,6 +108,7 @@ app.add_middleware(
 app.include_router(health.router, prefix="/api/v1")
 app.include_router(scan.router, prefix="/api/v1")
 app.include_router(receipts.router, prefix="/api/v1")
+app.include_router(bulk.router, prefix="/api/v1")
 app.include_router(user.router, prefix="/api/v1")
 app.include_router(devices.router, prefix="/api/v1")
 app.include_router(chat.router, prefix="/api/v1")

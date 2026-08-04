@@ -22,7 +22,7 @@ class Receipt(BaseModel):
     total_amount: float
     currency: str = "USD"
     category: str | None = None
-    date: datetime
+    date: str | datetime
     raw_text: str
     confidence_score: float = 0.0
     notes: str | None = None

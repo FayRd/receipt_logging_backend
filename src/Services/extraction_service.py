@@ -52,4 +52,15 @@ class ExtractionService:
                 response_schema=Receipt,
             ),
         )
-        return Receipt.model_validate_json(response.text)
+        text = response.text or ""
+
+        # Clean markdown wrappers if returned by Gemini
+        if text.startswith("```json"):
+            text = text[7:]
+        if text.startswith("```"):
+            text = text[3:]
+        if text.endswith("```"):
+            text = text[:-3]
+        text = text.strip()
+
+        return Receipt.model_validate_json(text)

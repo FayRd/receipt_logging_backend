@@ -14,7 +14,7 @@ redis_client: aioredis.Redis | None = None
 genai_client: genai.Client | None = None
 
 
-# ── PHASE 2: LIFESPAN INTEGRATION ─────────────────────────────────────────────
+# ── LIFESPAN INTEGRATION ─────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -23,14 +23,13 @@ async def lifespan(app: FastAPI):
     print(f"Starting Receipt API in {settings.environment} mode")
 
     # Initialize Async Redis client
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/1")
-    redis_client = aioredis.from_url(redis_url, decode_responses=True)
+    redis_client = aioredis.from_url(settings.redis_connection_string, decode_responses=True)
 
     # Initialize Google Gen AI async client
     genai_client = genai.Client(api_key=settings.gemini_api_key)
 
-    # Pass clients to bulk router module
-    bulk.init_bulk_clients(redis_client, genai_client)
+    # Pass redis client to bulk router module (genai handled internally by ExtractionService)
+    bulk.init_bulk_clients(redis_client)
 
     yield
 

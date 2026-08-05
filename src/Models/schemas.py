@@ -43,6 +43,33 @@ class ScanResponse(BaseModel):
     error: str | None
 
 
+class BulkJobSummary(BaseModel):
+    job_id: str
+    filename: str | None = None
+
+
+class BulkJobCreateResponse(BaseModel):
+    batch_id: str
+    total_jobs: int
+    jobs: list[BulkJobSummary]
+
+
+class BulkJobStatus(BaseModel):
+    job_id: str
+    batch_id: str
+    filename: str | None = None
+    status: str
+    data: Receipt | None = None
+    error: str | None = None
+
+
+class BulkBatchStatusResponse(BaseModel):
+    batch_id: str
+    total_jobs: int
+    completed_jobs: int
+    jobs: list[BulkJobStatus]
+
+
 class ReceiptRecord(BaseModel):
     id: str
     user_id: str | None = None

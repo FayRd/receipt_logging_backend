@@ -5,9 +5,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False, extra="ignore")
 
-    # Cloud & API Credentials
+    # Infrastructure Credentials & Services
     supabase_url: str
     supabase_key: str  
+    redis_connection_string: str
     gemini_api_key: str = ""
     openai_api_key: str = ""
     environment: str = "development"

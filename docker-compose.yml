@@ -18,9 +18,18 @@ services:
       - SUPABASE_URL=${SUPABASE_URL}
       - SUPABASE_KEY=${SUPABASE_KEY}
       - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8085/api/v1/health/ || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 5s
+
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: jaeger_dashboard
+    restart: unless-stopped
+    ports:
+      - "16686:16686" # Jaeger Web UI
+      - "4318:4318"   # OTLP HTTP Receiver

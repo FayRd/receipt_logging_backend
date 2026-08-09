@@ -116,3 +116,50 @@ async def require_user_identity(
             detail="Authentication required. Please sign in to access this resource.",
         )
     return identity
+
+
+async def get_sse_identity(
+    request: Request,
+    db: AsyncClient = Depends(get_supabase_client),
+) -> Identity:
+    """FastAPI dependency for SSE endpoints supporting both HTTP Headers and URL Query Parameters.
+    
+    This enables compatibility with standard browser EventSource APIs that cannot attach custom headers.
+    """
+    device_id = (request.headers.get("X-Device-ID") or request.query_params.get("device_id") or "").strip()
+    device_token = (request.headers.get("X-Device-Token") or request.query_params.get("device_token") or "").strip()
+    user_id = (request.headers.get("X-User-ID") or request.query_params.get("user_id") or "").strip() or None
+
+    if not device_id or not device_token:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Device authentication required via headers (X-Device-ID, X-Device-Token) or query parameters (device_id, device_token).",
+        )
+
+    device_repo = DeviceRepository(db)
+    device = await device_repo.get_by_device_id(device_id)
+
+    if not device:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unregistered device.",
+        )
+
+    stored_token_bytes = device["device_token"].encode("utf-8")
+    incoming_token_bytes = device_token.encode("utf-8")
+
+    if not secrets.compare_digest(incoming_token_bytes, stored_token_bytes):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid device authentication token.",
+        )
+
+    db_user_id = device.get("user_id")
+    if user_id and user_id != db_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User ID mismatch.",
+        )
+
+    return Identity(user_id=db_user_id, device_id=device_id)
+

@@ -1,11 +1,12 @@
+import asyncio
 import json
 import uuid
 import logging
-from typing import List
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
+from fastapi.responses import StreamingResponse
 
 import redis.asyncio as aioredis
-from src.Auth.identity import Identity, get_current_identity
+from src.Auth.identity import Identity, get_current_identity, get_sse_identity
 from src.Auth.rate_limiter import rate_limit
 from src.Models.schemas import BulkBatchStatusResponse, BulkJobCreateResponse, Receipt, ScanContext
 from src.Services.extraction_service import ExtractionService
@@ -38,6 +39,7 @@ async def process_receipt_worker(job_id: str, image_bytes: bytes, content_type: 
     job_key = f"job:{job_id}"
 
     # Step 1: Set status to PROCESSING
+    logger.info("Worker processing started for job %s", job_id)
     await redis_client.hset(job_key, "status", "PROCESSING")
 
     try:
@@ -62,6 +64,7 @@ async def process_receipt_worker(job_id: str, image_bytes: bytes, content_type: 
                 "status": "COMPLETED",
             },
         )
+        logger.info("Worker job %s COMPLETED successfully", job_id)
 
     except Exception as e:
         logger.error("Error processing receipt job %s: %s", job_id, e, exc_info=True)
@@ -155,7 +158,7 @@ async def create_bulk_receipt_jobs(
             job_id = str(uuid.uuid4())
             job_key = f"job:{job_id}"
 
-            # Set initial PENDING status with 3600s TTL
+            # Set initial PENDING status with 600s (10 min) TTL
             await redis_client.hset(
                 job_key,
                 mapping={
@@ -165,7 +168,7 @@ async def create_bulk_receipt_jobs(
                     "status": "PENDING",
                 },
             )
-            await redis_client.expire(job_key, 3600)
+            await redis_client.expire(job_key, settings.redis_job_ttl_seconds)
 
             # Add job_id to batch set
             await redis_client.sadd(batch_key, job_id)
@@ -178,7 +181,7 @@ async def create_bulk_receipt_jobs(
                 "filename": file.filename,
             })
 
-        await redis_client.expire(batch_key, 3600)
+        await redis_client.expire(batch_key, settings.redis_job_ttl_seconds)
 
         return {
             "batch_id": batch_id,
@@ -263,3 +266,88 @@ async def get_bulk_batch_status(batch_id: str):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve bulk batch status: {str(e)}",
         )
+
+
+@router.get(
+    "/{batch_id}/stream",
+    summary="SSE stream — emits batch_complete event with full extracted JSON data payload when finished",
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_scan_per_minute))],
+)
+async def stream_bulk_batch(
+    batch_id: str,
+    identity: Identity = Depends(get_sse_identity),
+):
+    """
+    Opens an SSE connection and polls Redis until every job in the batch
+    reaches a terminal state (COMPLETED or FAILED).
+
+    Supports authentication via Headers (X-Device-ID/Token) or Query Parameters (device_id/token).
+
+    Emits full JSON results payload directly over SSE:
+
+        event: batch_complete
+        data: {"batch_id": "...", "total_jobs": 2, "completed_jobs": 2, "jobs": [...]}
+
+    On timeout:
+
+        event: timeout
+        data: {"error": "Batch polling timed out"}
+
+    On error:
+
+        event: error
+        data: {"error": "Invalid batch or service unavailable"}
+    """
+    settings = get_settings()
+    poll_interval = settings.sse_poll_interval_seconds
+    timeout = settings.sse_batch_timeout_seconds
+
+    async def event_generator():
+        logger.info("SSE stream opened for batch %s", batch_id)
+        if not redis_client:
+            logger.error("SSE stream error: Redis client unavailable for batch %s", batch_id)
+            yield f"event: error\ndata: {json.dumps({'error': 'Redis service unavailable'})}\n\n"
+            return
+
+        batch_key = f"batch:{batch_id}"
+        job_ids = await redis_client.smembers(batch_key)
+
+        if not job_ids:
+            logger.warning("SSE stream error: Batch %s not found or expired", batch_id)
+            yield f"event: error\ndata: {json.dumps({'error': 'Batch ID not found or expired'})}\n\n"
+            return
+
+        elapsed = 0.0
+        terminal = {"COMPLETED", "FAILED"}
+
+        while elapsed < timeout:
+            statuses = []
+            for job_id in job_ids:
+                job_hash = await redis_client.hgetall(f"job:{job_id}")
+                statuses.append(job_hash.get("status", "PENDING"))
+
+            if all(s in terminal for s in statuses):
+                # Fetch complete batch data object and send directly in SSE data field
+                batch_data = await get_bulk_batch_status(batch_id)
+                logger.info("Batch %s complete. Emitting batch_complete SSE event with full JSON payload.", batch_id)
+                yield f"event: batch_complete\ndata: {json.dumps(batch_data)}\n\n"
+                return
+
+            # Keep-alive comment to prevent proxy/nginx from closing idle connection
+            yield ": keep-alive\n\n"
+            await asyncio.sleep(poll_interval)
+            elapsed += poll_interval
+
+        # Timeout
+        logger.warning("Batch %s SSE stream timed out after %ds", batch_id, timeout)
+        yield f"event: timeout\ndata: {json.dumps({'error': 'Batch processing timed out'})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )

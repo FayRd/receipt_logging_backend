@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     redis_connection_string: str
     gemini_api_key: str = ""
     openai_api_key: str = ""
+    logfire_token: str = ""
     environment: str = "development"
 
     # CORS Configuration
@@ -40,6 +41,11 @@ class Settings(BaseSettings):
     rate_limit_auth_per_minute: int = 10          # User & Device auth endpoints
     rate_limit_crud_per_minute: int = 60          # Standard session CRUD
     rate_limit_health_per_minute: int = 120       # Health check route
+
+    # SSE Bulk Batch Stream Settings
+    sse_poll_interval_seconds: float = 1.0        # Redis poll cadence per loop
+    sse_batch_timeout_seconds: int = 300          # Max wait before emitting timeout
+    redis_job_ttl_seconds: int = 600              # Redis job and batch expiration TTL (10 minutes)
 
 
 @lru_cache

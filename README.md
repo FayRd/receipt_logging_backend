@@ -4,7 +4,7 @@ An AI-powered FastAPI backend service for receipt scanning, structured data extr
 
 ---
 
-## 🚀 Application Summary
+## Application Summary
 
 The **Receipt Logger Backend** provides high-speed, intelligent multimodal receipt parsing, conversational AI financial assistance, and secure data management for the privacy-first mobile client. It accepts receipt image uploads, processes them directly with Gemini 3.6 Flash Vision AI using strict structured Pydantic schemas, and returns validated JSON containing merchant info, line items, totals, dates, and categories in ~1.5 seconds. It also features a personalized RAG AI Chat assistant powered by Gemini 3.6 Flash, session-scoped CRUD & soft-delete endpoints, cryptographic device fingerprint verification (`X-Device-Token`), identity-keyed rate limiting, and a locked-down Backend Service Gateway architecture in Supabase.
 
@@ -12,21 +12,21 @@ The **Receipt Logger Backend** provides high-speed, intelligent multimodal recei
 - **Framework**: FastAPI (Python 3.10+) with Uvicorn ASGI server
 - **Auth & Rate Limiting**: `src/Auth/` package (`Identity` model, `X-Device-Token` verification via constant-time `secrets.compare_digest`, `SlidingWindowRateLimiter` engine)
 - **Backend Service Gateway Architecture**: Supabase public `anon` access is **100% revoked/blocked**; FastAPI connects exclusively via the `service_role` key
-- **Database Migrations & RLS**: Idempotent SQL scripts in `migration/` (`00_teardown_all.sql`, `01_schema_tables.sql`, `02_indexes_triggers.sql`, `03_rls_policies.sql`, `04_grants_permissions.sql`)
+- **Database Migrations & RLS**: Idempotent SQL scripts in [`migration/`](file:///home/ninonakano/Desktop/receipt_logging_backend/migration) (`00_teardown_all.sql`, `01_schema_tables.sql`, `02_indexes_triggers.sql`, `03_rls_policies.sql`, `04_grants_permissions.sql`)
 - **AI Extraction & Chat**: `google-genai` SDK (`gemini-3.6-flash` Multimodal Vision & RAG) with XML prompt boundary isolation and `>=0.8` document type confidence validation
 - **Containerization**: Docker & Docker Compose (`docker-compose.yml`, `Dockerfile`, `.dockerignore`)
 - **Data Validation**: Pydantic v2 schemas (`Receipt`, `LineItem`, `ScanResponse`, `ReceiptRecord`, `UserRecord`, `DeviceRecord`, `ConversationRecord`, `ChatMessageRecord`)
 - **Cloud Database & Storage**: Supabase (`supabase-py` `AsyncClient`) for Postgres DB, Storage, and Vector search
 - **Architecture**: Layered Architecture with per-model repository pattern (`Receipts`, `Users`, `Devices`, `Conversations`)
-- **Testing**: Automated Pytest suite (54 tests in `test/`) with `test-engineer` and `security-advisor` subagents
+- **Testing**: Automated Pytest suite (54 tests in [`test/`](file:///home/ninonakano/Desktop/receipt_logging_backend/test))
 - **Configuration**: Pydantic `BaseSettings` & `python-dotenv`
 
 ---
-V
-## ✨ Features Breakdown
+
+## Features Breakdown
 
 ### Implemented Features
-- **Identity-Keyed Rate Limiting & DoS Protection** (`src/Auth/rate_limiter.py`):
+- **Identity-Keyed Rate Limiting & DoS Protection** ([`src/Auth/rate_limiter.py`](file:///home/ninonakano/Desktop/receipt_logging_backend/src/Auth/rate_limiter.py)):
   - Enforces high-precision **Sliding Window Counter** rate limits across all routes.
   - Keyed by client identity (`X-Device-ID`, falling back to client IP) to prevent shared NAT/Wi-Fi choking.
   - Returns standard `HTTP 429 Too Many Requests` with `Retry-After`, `X-RateLimit-Limit`, and `X-RateLimit-Remaining` HTTP response headers.
@@ -34,7 +34,7 @@ V
 - **Backend Service Gateway & Supabase Security**:
   - All public `anon` access to Supabase PostgREST is completely revoked (`REVOKE ALL ON ALL TABLES IN SCHEMA public FROM anon;`).
   - Database access is restricted strictly to FastAPI via the secret `service_role` key (`SUPABASE_KEY`).
-  - Idempotent migration scripts provided in `migration/` with teardown/rollback capabilities (`00_teardown_all.sql`).
+  - Idempotent migration scripts provided in [`migration/`](file:///home/ninonakano/Desktop/receipt_logging_backend/migration) with teardown/rollback capabilities (`00_teardown_all.sql`).
 - **Device Management & Soft-Delete** (`/api/v1/devices`):
   - `POST /api/v1/devices/register`: Idempotent registration of hardware `device_id` and secret `device_token`. Fails closed (`401`) on token mismatch.
   - `GET /api/v1/devices/me`: Retrieves current device registration record.
@@ -62,12 +62,12 @@ V
   - `GET /api/v1/chat/history`: Fetches chunked, paginated message history.
   - `POST /api/v1/chat/query`: Sends query to Gemini 3.6 Flash using identity-scoped receipt history for RAG context (protected with XML prompt boundary isolation).
   - `DELETE /api/v1/chat/{conversation_id}`: Soft-deletes a conversation by UUID (session ownership enforced).
-- **Explicit HTTP 422 Error Handling**: Custom exception handlers in `main.py` intercept any request payload schema mismatches or invalid data types and return clean `HTTP 422 Unprocessable Entity` responses.
+- **Explicit HTTP 422 Error Handling**: Custom exception handlers in [`main.py`](file:///home/ninonakano/Desktop/receipt_logging_backend/main.py) intercept any request payload schema mismatches or invalid data types and return clean `HTTP 422 Unprocessable Entity` responses.
 - **Health Check & Diagnostics** (`GET /api/v1/health/`): Returns API operational status and environment setting.
 
 ---
 
-## 🛠️ Header Authentication Contract
+## Header Authentication Contract
 
 All protected endpoints require the following HTTP headers:
 
@@ -79,43 +79,105 @@ All protected endpoints require the following HTTP headers:
 
 ---
 
-## 🏃 Running the Application & Test Suite
+## Step-by-Step Guide to Running the Backend
 
-### Running the Application
+Follow these steps to configure, set up, and run the backend locally or in Docker.
 
-```powershell
-.\run.ps1
+### Step 1: System Prerequisites
+Ensure the following tools are installed on your machine:
+- **Python 3.10** or higher
+- **Redis Server** (running locally on port `6379` or accessible via network URL)
+- **Supabase Account & Project** (PostgreSQL instance with `service_role` key access)
+- **Google Gemini API Key** (for Vision AI parsing and RAG chat)
+
+### Step 2: Environment Configuration
+Create a `.env` file in the root directory by copying [`.env.example`](file:///home/ninonakano/Desktop/receipt_logging_backend/.env.example):
+
+```bash
+cp .env.example .env
 ```
 
-### Running with Docker Compose (Standalone Container)
+Populate `.env` with your actual service credentials:
+
+```env
+SUPABASE_URL=https://your-supabase-project.supabase.co
+SUPABASE_KEY=your-supabase-service-role-key
+REDIS_CONNECTION_STRING=redis://localhost:6379
+GEMINI_API_KEY=your-google-gemini-api-key
+ENVIRONMENT=development
+ALLOWED_ORIGINS=["*"]
+```
+
+> Note: `SUPABASE_KEY` must be the **service_role** secret key because public `anon` access is revoked by migration policy scripts.
+
+### Step 3: Supabase Database Migration
+Execute the SQL migration scripts in [`migration/`](file:///home/ninonakano/Desktop/receipt_logging_backend/migration) in sequential order in the Supabase SQL Editor:
+1. [`migration/00_teardown_all.sql`](file:///home/ninonakano/Desktop/receipt_logging_backend/migration/00_teardown_all.sql) *(Optional: use only when resetting database schema)*
+2. [`migration/01_schema_tables.sql`](file:///home/ninonakano/Desktop/receipt_logging_backend/migration/01_schema_tables.sql) *(Creates core tables, foreign keys, and soft-delete columns)*
+3. [`migration/02_indexes_triggers.sql`](file:///home/ninonakano/Desktop/receipt_logging_backend/migration/02_indexes_triggers.sql) *(Creates performance indexes and conversation cap triggers)*
+4. [`migration/03_rls_policies.sql`](file:///home/ninonakano/Desktop/receipt_logging_backend/migration/03_rls_policies.sql) *(Configures Row Level Security)*
+5. [`migration/04_grants_permissions.sql`](file:///home/ninonakano/Desktop/receipt_logging_backend/migration/04_grants_permissions.sql) *(Revokes public `anon` access and grants permissions to `service_role`)*
+
+### Step 4: Create Virtual Environment & Install Dependencies
+Initialize Python virtual environment and install required packages:
+
+```bash
+# Create virtual environment
+python3 -m venv .venv
+
+# Activate virtual environment (Linux/macOS)
+source .venv/bin/activate
+
+# Install requirements
+pip install -r requirements.txt
+```
+
+### Step 5: Start the Backend Server
+
+#### Option A: Using the Linux Bash Run Script (Recommended)
+Make [`run.sh`](file:///home/ninonakano/Desktop/receipt_logging_backend/run.sh) executable and run it:
+
+```bash
+chmod +x run.sh
+./run.sh
+```
+
+#### Option B: Direct Uvicorn CLI Execution
+Run Uvicorn directly from the virtual environment:
+
+```bash
+.venv/bin/uvicorn main:app --host 0.0.0.0 --port 8085 --reload
+```
+
+#### Option C: Docker Compose (Standalone Container)
+Build and spin up the backend container:
 
 ```bash
 # Build and start container in background
 docker compose up -d --build
 
-# View container logs
+# View real-time container logs
 docker compose logs -f
 
 # Stop container
 docker compose down
 ```
 
-Or manually:
+---
+
+## Running the Pytest Test Suite
+
+Execute the automated unit and integration test suite (54 tests):
+
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 8085 --reload
-```
-
-### Running the Pytest Test Suite
-
-```powershell
-.venv\Scripts\pytest.exe -v test/
+.venv/bin/pytest -v test/
 ```
 
 ---
 
-## 🌐 API Documentation & Interactive Docs
+## API Documentation & Interactive Docs
 
-Once running, access the interactive API documentation at:
+Once the backend service is running, access interactive API documentation at:
 - **Swagger UI**: [http://localhost:8085/docs](http://localhost:8085/docs)
 - **ReDoc**: [http://localhost:8085/redoc](http://localhost:8085/redoc)
 - **OpenAPI Schema**: [http://localhost:8085/openapi.json](http://localhost:8085/openapi.json)

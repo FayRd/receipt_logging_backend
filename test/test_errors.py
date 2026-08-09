@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import pytest
 
 def test_unauthorized_wrong_device_token(client, mock_device):
@@ -16,3 +17,9 @@ def test_invalid_json_structure(client, mock_device):
     # Completely invalid structure for POST /receipts/
     response = client.post("/api/v1/receipts/create", json={"completely_wrong": "structure"}, headers=mock_device["headers"])
     assert response.status_code == 422
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(pytest.main([__file__]))
+

@@ -141,6 +141,7 @@ def parse_arq_redis_settings(dsn: str) -> RedisSettings:
         rs.password = urllib.parse.unquote(rs.password)
     if rs.username:
         rs.username = urllib.parse.unquote(rs.username)
+    rs.conn_timeout = 10
     return rs
 
 

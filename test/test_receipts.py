@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 from datetime import datetime, timezone
 
 def generate_receipt_payload():
@@ -68,3 +69,10 @@ def test_delete_receipt(client, mock_user_session):
     # Delete again
     del_res_2 = client.delete(f"/api/v1/receipts/{receipt_id}", headers=mock_user_session["headers"])
     assert del_res_2.status_code == 404
+
+
+if __name__ == "__main__":
+    import pytest
+    import sys
+    sys.exit(pytest.main([__file__]))
+

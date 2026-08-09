@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import io
 from datetime import datetime
 from unittest.mock import AsyncMock, patch
@@ -95,3 +96,10 @@ def test_scan_parse_file_size_exceeded(client, mock_device):
 
     assert response.status_code == 400
     assert "exceeds maximum limit of 10MB" in response.json()["detail"]
+
+
+if __name__ == "__main__":
+    import pytest
+    import sys
+    sys.exit(pytest.main([__file__]))
+

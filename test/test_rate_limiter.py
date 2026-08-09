@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import pytest
 from src.Auth.rate_limiter import limiter
 
@@ -58,3 +59,9 @@ def test_rate_limit_distinct_keys(client):
     # Dev 2 is still permitted
     res2 = client.post("/api/v1/user/login", json=payload, headers=dev2_headers)
     assert res2.status_code == 401
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(pytest.main([__file__]))
+

@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import uuid
 
 def test_user_create_success(client):
@@ -95,3 +96,10 @@ def test_delete_user_me_already_deleted(client, mock_user_session):
     # Second delete should be 401 (Unauthorized) because session is revoked
     res2 = client.delete("/api/v1/user/me", headers=mock_user_session["headers"])
     assert res2.status_code == 401
+
+
+if __name__ == "__main__":
+    import pytest
+    import sys
+    sys.exit(pytest.main([__file__]))
+

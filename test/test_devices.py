@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import uuid
 
 def test_register_new_device(client):
@@ -133,3 +134,10 @@ def test_delete_device_me_already_deleted(client, mock_device):
     
     res2 = client.delete("/api/v1/devices/me", headers=mock_device["headers"])
     assert res2.status_code == 401
+
+
+if __name__ == "__main__":
+    import pytest
+    import sys
+    sys.exit(pytest.main([__file__]))
+

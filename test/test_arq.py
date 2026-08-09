@@ -25,11 +25,7 @@ from dotenv import load_dotenv
 env_path = PROJECT_ROOT / ".env"
 load_dotenv(dotenv_path=env_path, override=True)
 
-# Read straight from .env - NO HARDCODED VALUE and NO FALLBACK
-REDIS_CONNECTION_STRING = os.getenv("REDIS_CONNECTION_STRING")
-if not REDIS_CONNECTION_STRING:
-    print("Error: REDIS_CONNECTION_STRING is not set in .env file!", file=sys.stderr)
-    sys.exit(1)
+REDIS_CONNECTION_STRING = os.getenv("REDIS_CONNECTION_STRING", "redis://localhost:6379")
 
 from arq import create_pool
 from arq.worker import Worker

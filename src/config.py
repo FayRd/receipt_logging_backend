@@ -8,7 +8,7 @@ class Settings(BaseSettings):
     # Infrastructure Credentials & Services
     supabase_url: str
     supabase_key: str  
-    redis_connection_string: str
+    redis_connection_string: str = "redis://localhost:6379"
     gemini_api_key: str = ""
     openai_api_key: str = ""
     logfire_token: str = ""

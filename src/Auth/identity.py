@@ -1,5 +1,5 @@
 import secrets
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel
 from supabase import AsyncClient
 from src.Infrastructure.database import get_supabase_client

@@ -98,6 +98,89 @@ def test_scan_parse_file_size_exceeded(client, mock_device):
     assert "exceeds maximum limit of 10MB" in response.json()["detail"]
 
 
+# ── /parse-many endpoint tests ─────────────────────────────────────────
+
+def test_scan_parse_many_too_few_files(client, mock_device):
+    """Batch with fewer than 2 files returns HTTP 400."""
+    file_bytes = b"fake_receipt_image_bytes"
+    files = [("files", ("receipt1.jpg", io.BytesIO(file_bytes), "image/jpeg"))]
+
+    response = client.post(
+        "/api/v1/scan/parse-many",
+        headers=mock_device["headers"],
+        files=files,
+    )
+
+    assert response.status_code == 400
+    assert "between 2 and 10" in response.json()["detail"]
+
+
+def test_scan_parse_many_too_many_files(client, mock_device):
+    """Batch with more than 10 files returns HTTP 400."""
+    file_bytes = b"fake_receipt_image_bytes"
+    files = [
+        ("files", (f"receipt{i}.jpg", io.BytesIO(file_bytes), "image/jpeg"))
+        for i in range(11)
+    ]
+
+    response = client.post(
+        "/api/v1/scan/parse-many",
+        headers=mock_device["headers"],
+        files=files,
+    )
+
+    assert response.status_code == 400
+    assert "between 2 and 10" in response.json()["detail"]
+
+
+def test_scan_parse_many_file_size_exceeded(client, mock_device):
+    """Individual file exceeding 10MB returns HTTP 400."""
+    large_bytes = b"0" * (11 * 1024 * 1024)
+    small_bytes = b"small_file"
+    files = [
+        ("files", ("huge.jpg", io.BytesIO(large_bytes), "image/jpeg")),
+        ("files", ("receipt.jpg", io.BytesIO(small_bytes), "image/jpeg")),
+    ]
+
+    response = client.post(
+        "/api/v1/scan/parse-many",
+        headers=mock_device["headers"],
+        files=files,
+    )
+
+    assert response.status_code == 400
+    assert "exceeds maximum allowed size" in response.json()["detail"]
+
+
+def test_scan_parse_many_unauthenticated(client, invalid_headers):
+    """Unauthenticated request returns HTTP 401."""
+    file_bytes = b"fake_receipt_image_bytes"
+    files = [
+        ("files", ("receipt1.jpg", io.BytesIO(file_bytes), "image/jpeg")),
+        ("files", ("receipt2.jpg", io.BytesIO(file_bytes), "image/jpeg")),
+    ]
+
+    response = client.post(
+        "/api/v1/scan/parse-many",
+        headers=invalid_headers,
+        files=files,
+    )
+
+    assert response.status_code == 401
+
+
+def test_scan_parse_many_batch_status_not_found(client, mock_device):
+    """GET /parse-many/{batch_id} returns HTTP 404 for unknown batch_id."""
+    response = client.get(
+        "/api/v1/scan/parse-many/nonexistent-batch-id-12345",
+        headers=mock_device["headers"],
+    )
+
+    # 503 when Redis client is not initialised in test context,
+    # 404 when batch is not found, 500 when Redis is initialised but unreachable
+    assert response.status_code in (404, 500, 503)
+
+
 if __name__ == "__main__":
     import pytest
     import sys

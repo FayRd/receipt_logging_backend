@@ -8,7 +8,7 @@ from pydantic import ValidationError
 import redis.asyncio as aioredis
 from google import genai
 from src.config import get_settings
-from src.API.v1 import health, scan, receipts, user, devices, chat, bulk
+from src.API.v1 import health, scan, receipts, user, devices, chat
 
 redis_client: aioredis.Redis | None = None
 genai_client: genai.Client | None = None
@@ -28,8 +28,8 @@ async def lifespan(app: FastAPI):
     # Initialize Google Gen AI async client
     genai_client = genai.Client(api_key=settings.gemini_api_key)
 
-    # Pass redis client to bulk router module (genai handled internally by ExtractionService)
-    bulk.init_bulk_clients(redis_client)
+    # Pass redis client to scan router module (genai handled internally by ExtractionService)
+    scan.init_redis_client(redis_client)
 
     yield
 
@@ -107,7 +107,7 @@ app.add_middleware(
 app.include_router(health.router, prefix="/api/v1")
 app.include_router(scan.router, prefix="/api/v1")
 app.include_router(receipts.router, prefix="/api/v1")
-app.include_router(bulk.router, prefix="/api/v1")
+
 app.include_router(user.router, prefix="/api/v1")
 app.include_router(devices.router, prefix="/api/v1")
 app.include_router(chat.router, prefix="/api/v1")

@@ -53,3 +53,17 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     content TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- 6. Forget Password Requests Table
+CREATE TABLE IF NOT EXISTS forget_password (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    email TEXT,
+    mobile_number TEXT,
+    otp_hash TEXT NOT NULL,
+    reset_token_hash TEXT,
+    attempts_count INT NOT NULL DEFAULT 0,
+    is_used BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ NOT NULL
+);

@@ -10,6 +10,8 @@ CREATE INDEX IF NOT EXISTS idx_devices_user ON devices (user_id) WHERE deleted_a
 CREATE INDEX IF NOT EXISTS idx_receipts_identity ON receipts (device_id, user_id) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_conversations_identity ON conversations (device_id, user_id) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_chat_messages_conv ON chat_messages (conversation_id, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_forget_password_user ON forget_password (user_id) WHERE is_used IS FALSE;
+CREATE INDEX IF NOT EXISTS idx_forget_password_token ON forget_password (reset_token_hash) WHERE is_used IS FALSE;
 
 -- ── 2. TRIGGER FUNCTION: AUTO-UPDATE CONVERSATION UPDATED_AT ────────────────
 CREATE OR REPLACE FUNCTION update_conversation_updated_at()
@@ -75,3 +77,30 @@ BEGIN
   RETURN FALSE;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- ── 5. FORGET PASSWORD RLS POLICIES & PERMISSIONS ────────────────────────────
+ALTER TABLE forget_password ENABLE ROW LEVEL SECURITY;
+
+GRANT SELECT, INSERT, UPDATE ON TABLE forget_password TO anon, authenticated, service_role;
+
+DROP POLICY IF EXISTS "Allow anon and authenticated to insert forget_password" ON forget_password;
+CREATE POLICY "Allow anon and authenticated to insert forget_password"
+ON forget_password
+FOR INSERT
+TO anon, authenticated, service_role
+WITH CHECK (true);
+
+DROP POLICY IF EXISTS "Allow anon and authenticated to select forget_password" ON forget_password;
+CREATE POLICY "Allow anon and authenticated to select forget_password"
+ON forget_password
+FOR SELECT
+TO anon, authenticated, service_role
+USING (true);
+
+DROP POLICY IF EXISTS "Allow anon and authenticated to update forget_password" ON forget_password;
+CREATE POLICY "Allow anon and authenticated to update forget_password"
+ON forget_password
+FOR UPDATE
+TO anon, authenticated, service_role
+USING (true)
+WITH CHECK (true);

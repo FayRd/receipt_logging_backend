@@ -16,6 +16,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE devices TO service_role, authentic
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE receipts TO service_role, authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE conversations TO service_role, authenticated;
 GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE chat_messages TO service_role, authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE forget_password TO service_role, authenticated, anon;
 
 -- 4. Grant Sequence Privileges
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO service_role, authenticated;

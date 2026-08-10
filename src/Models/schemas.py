@@ -148,6 +148,25 @@ class UserLoginResponse(BaseModel):
     message: str
 
 
+# ── PASSWORD RESET SCHEMAS ───────────────────────────────────────────────────
+
+class PasswordResetInitiateRequest(BaseModel):
+    """Request body for initiating a password reset via email or mobile number."""
+    identifier: str = Field(..., min_length=3, description="Email address or mobile number.")
+
+
+class PasswordResetOtpRequest(BaseModel):
+    """Request body for verifying a 6-digit password reset OTP."""
+    identifier: str = Field(..., min_length=3, description="Email address or mobile number.")
+    otp: str = Field(..., min_length=6, max_length=6, description="6-digit numeric OTP code.")
+
+
+class PasswordResetNewRequest(BaseModel):
+    """Request body for setting a new password using a single-use reset_token."""
+    reset_token: str = Field(..., min_length=10, description="Single-use reset token issued after OTP verification.")
+    new_password: str = Field(..., min_length=6, description="New password.")
+
+
 # ── CHAT / CONVERSATION SCHEMAS ───────────────────────────────────────────────
 
 class ConversationCreateRequest(BaseModel):

@@ -106,13 +106,16 @@ class HealthResponse(BaseModel):
 class UserCreateRequest(BaseModel):
     """Request body for new user registration."""
     username: str = Field(..., min_length=3, max_length=50)
+    email: str = Field(..., description="Unique email address for account identification and login.")
     password: str = Field(..., min_length=6)  # Pre-encrypted string from client
+    country_code: str | None = Field(default=None, max_length=10, description="E.164 country dialling code, e.g. +60.")
+    mobile_number: str | None = Field(default=None, max_length=20, description="Mobile number without country code.")
     avatar_image_path: str | None = None
 
 
 class UserLoginRequest(BaseModel):
-    """Request body for user login."""
-    username: str
+    """Request body for user login. `username` may be an email address or username."""
+    username: str = Field(..., description="Username or email address.")
     password: str  # Pre-encrypted string from client
 
 
@@ -120,9 +123,23 @@ class UserRecord(BaseModel):
     """Sanitized user model — password is never included."""
     id: str
     username: str
+    email: str
+    country_code: str | None = None
+    mobile_number: str | None = None
     avatar_image_path: str | None = None
     created_at: datetime
     deleted_at: datetime | None = None
+
+
+class UserUpdateRequest(BaseModel):
+    """Request body for updating user profile via PATCH /user/me.
+
+    All fields are optional — only non-None values will be persisted.
+    """
+    email: str | None = None
+    country_code: str | None = Field(default=None, max_length=10)
+    mobile_number: str | None = Field(default=None, max_length=20)
+    avatar_image_path: str | None = None
 
 
 class UserLoginResponse(BaseModel):

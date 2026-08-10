@@ -3,6 +3,8 @@
 
 -- ── 1. PERFORMANCE INDEXES ───────────────────────────────────────────────────
 CREATE INDEX IF NOT EXISTS idx_users_username ON users (LOWER(username)) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_users_email ON users (LOWER(email)) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_users_mobile ON users (mobile_number) WHERE deleted_at IS NULL AND mobile_number IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_devices_hardware ON devices (device_id) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_devices_user ON devices (user_id) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_receipts_identity ON receipts (device_id, user_id) WHERE deleted_at IS NULL;

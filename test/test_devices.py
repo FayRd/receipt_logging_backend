@@ -37,6 +37,7 @@ def test_device_link_success(client, mock_device):
     password = "secure_password123"
     create_res = client.post("/api/v1/user/create", json={
         "username": username,
+        "email": f"{username}@test.example.com",
         "password": password
     })
     assert create_res.status_code == 201
@@ -76,7 +77,11 @@ def test_device_link_migrates_guest_data(client, mock_device):
 
     # 2. Create user
     username = f"user_{uuid.uuid4().hex[:6]}"
-    create_res = client.post("/api/v1/user/create", json={"username": username, "password": "secure_password"})
+    create_res = client.post("/api/v1/user/create", json={
+        "username": username,
+        "email": f"{username}@test.example.com",
+        "password": "secure_password",
+    })
     user_id = create_res.json()["id"]
 
     # 3. Link device to user

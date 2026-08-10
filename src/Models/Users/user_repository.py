@@ -1,6 +1,9 @@
 import hashlib
 from supabase import AsyncClient
-from src.Models.schemas import UserCreateRequest
+from src.Models.schemas import UserCreateRequest, UserUpdateRequest
+
+# Columns returned in all sanitized (non-auth) user fetches
+_USER_SAFE_COLUMNS = "id, username, email, country_code, mobile_number, avatar_image_path, created_at, deleted_at"
 
 
 class UserRepository:
@@ -41,11 +44,34 @@ class UserRepository:
         )
         return res.data if res else None
 
+    async def get_by_email(self, email: str) -> dict | None:
+        """Fetch a raw user row (including password hash) by email (case-insensitive)."""
+        res = await (
+            self.db.table(self.TABLE)
+            .select("*")
+            .ilike("email", email.strip())
+            .is_("deleted_at", "null")
+            .maybe_single()
+            .execute()
+        )
+        return res.data if res else None
+
+    async def get_by_identifier(self, identifier: str) -> dict | None:
+        """Fetch a raw user row by username or email (case-insensitive).
+
+        Tries username first; if not found, attempts email lookup.
+        Used by the login endpoint to support both login modes.
+        """
+        user = await self.get_by_username(identifier)
+        if user:
+            return user
+        return await self.get_by_email(identifier)
+
     async def get_by_id(self, user_id: str) -> dict | None:
         """Fetch a sanitized user row (no password) by UUID."""
         res = await (
             self.db.table(self.TABLE)
-            .select("id, username, avatar_image_path, created_at, deleted_at")
+            .select(_USER_SAFE_COLUMNS)
             .eq("id", user_id)
             .is_("deleted_at", "null")
             .maybe_single()
@@ -60,12 +86,47 @@ class UserRepository:
         hashed_pwd = self.hash_password(req.password)
         row = {
             "username": req.username.strip(),
+            "email": req.email.strip().lower(),
             "password": hashed_pwd,
+            "country_code": req.country_code,
+            "mobile_number": req.mobile_number,
             "avatar_image_path": req.avatar_image_path,
         }
         res = await self.db.table(self.TABLE).insert(row).execute()
         user_data = res.data[0]
         user_data.pop("password", None)  # Never expose the hash
+        return user_data
+
+    async def update_profile(self, user_id: str, req: UserUpdateRequest) -> dict | None:
+        """Patch mutable profile fields for a user. Only non-None fields are written.
+
+        Returns the updated sanitized user row, or None if the user was not found.
+        """
+        updates: dict = {}
+        if req.email is not None:
+            updates["email"] = req.email.strip().lower()
+        if req.country_code is not None:
+            updates["country_code"] = req.country_code
+        if req.mobile_number is not None:
+            updates["mobile_number"] = req.mobile_number
+        if req.avatar_image_path is not None:
+            updates["avatar_image_path"] = req.avatar_image_path
+
+        if not updates:
+            # No-op: return current profile without touching DB
+            return await self.get_by_id(user_id)
+
+        res = await (
+            self.db.table(self.TABLE)
+            .update(updates)
+            .eq("id", user_id)
+            .is_("deleted_at", "null")
+            .execute()
+        )
+        if not res.data:
+            return None
+        user_data = res.data[0]
+        user_data.pop("password", None)
         return user_data
 
     # ── SOFT DELETE ───────────────────────────────────────────────────────────

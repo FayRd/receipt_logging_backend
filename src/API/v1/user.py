@@ -8,6 +8,7 @@ from src.Models.schemas import (
     UserLoginRequest,
     UserRecord,
     UserLoginResponse,
+    UserUpdateRequest,
 )
 from src.Models.Users.user_repository import UserRepository
 
@@ -29,13 +30,15 @@ async def create_user(
     body: UserCreateRequest,
     repo: UserRepository = Depends(get_repo),
 ):
-    """Register a new user account. Rejects duplicate usernames (case-insensitive).
+    """Register a new user account. Rejects duplicate usernames or emails (case-insensitive).
 
     This is an unauthenticated public endpoint — rate limited to protect against registration spam.
     """
-    existing = await repo.get_by_username(body.username)
-    if existing:
+    if await repo.get_by_username(body.username):
         raise HTTPException(status_code=409, detail="Username already taken.")
+
+    if await repo.get_by_email(body.email):
+        raise HTTPException(status_code=409, detail="An account with this email already exists.")
 
     user = await repo.create(body)
     return user
@@ -53,9 +56,10 @@ async def login_user(
 ):
     """Authenticate user credentials and return sanitized user profile.
 
+    Supports login via username or email address.
     Rate limited to protect against brute-force password guessing attacks.
     """
-    user = await repo.get_by_username(body.username)
+    user = await repo.get_by_identifier(body.username)
     # Identical error for missing user AND wrong password — prevents username enumeration
     if not user:
         raise HTTPException(status_code=401, detail="Invalid username or password.")
@@ -87,6 +91,34 @@ async def get_my_profile(
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
     return user
+
+
+# ── PATCH /user/me ────────────────────────────────────────────────────────────
+@router.patch(
+    "/me",
+    response_model=UserRecord,
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_crud_per_minute))],
+)
+async def update_my_profile(
+    body: UserUpdateRequest,
+    identity: Identity = Depends(require_user_identity),
+    repo: UserRepository = Depends(get_repo),
+):
+    """Update mutable profile fields for the authenticated user.
+
+    All fields are optional — only supplied (non-null) values are written.
+    Rejects duplicate emails (case-insensitive) with HTTP 409.
+    Requires X-Device-ID, X-Device-Token, and X-User-ID headers.
+    """
+    if body.email is not None:
+        existing = await repo.get_by_email(body.email)
+        if existing and existing.get("id") != identity.user_id:
+            raise HTTPException(status_code=409, detail="An account with this email already exists.")
+
+    updated = await repo.update_profile(identity.user_id, body)
+    if not updated:
+        raise HTTPException(status_code=404, detail="User not found.")
+    return updated
 
 
 # ── DELETE /user/me ───────────────────────────────────────────────────────────

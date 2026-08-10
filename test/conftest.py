@@ -47,10 +47,12 @@ def mock_device(client):
 @pytest.fixture(scope="function")
 def mock_user_session(client, mock_device):
     username = f"test_qa_user_{uuid.uuid4().hex[:6]}"
+    email = f"{username}@test.example.com"
     password = "secret_password_123"
 
     response = client.post(
-        "/api/v1/user/create", json={"username": username, "password": password}
+        "/api/v1/user/create",
+        json={"username": username, "email": email, "password": password},
     )
 
     if response.status_code == 409:
@@ -81,6 +83,7 @@ def mock_user_session(client, mock_device):
     return {
         "user_id": user_id,
         "username": username,
+        "email": email,
         "headers": headers,
         "device_id": mock_device["device_id"],
         "device_token": mock_device["device_token"],

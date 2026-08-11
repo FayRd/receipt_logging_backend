@@ -20,9 +20,10 @@ class UserRepository:
     # ── PASSWORD HASHING ──────────────────────────────────────────────────────
     # This is a pure CPU operation — intentionally kept sync (no I/O).
 
-    def hash_password(self, password: str) -> str:
+    @staticmethod
+    def hash_password(password: str) -> str:
         """Apply server-side PBKDF2/SHA-256 salted hash to the incoming password string."""
-        salted = f"{password}:{self._SERVER_SALT}".encode("utf-8")
+        salted = f"{password}:{UserRepository._SERVER_SALT}".encode("utf-8")
         return hashlib.pbkdf2_hmac(
             "sha256",
             salted,

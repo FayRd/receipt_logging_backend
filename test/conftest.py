@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from main import app
 from src.Auth.rate_limiter import limiter
+from src.Models.Users.user_repository import UserRepository
 
 
 @pytest.fixture(scope="session")
@@ -58,6 +59,7 @@ def mock_user_session(client, mock_device):
     username = f"test_qa_user_{uuid.uuid4().hex[:6]}"
     email = f"{username}@test.example.com"
     password = "secret_password_123"
+    password_hash = UserRepository.hash_password(password)
 
     response = client.post(
         "/api/v1/user/create",
@@ -74,29 +76,37 @@ def mock_user_session(client, mock_device):
         assert response.status_code == 201
         user_id = response.json()["id"]
 
-    # Link device to user — POST /devices/link requires all 3 headers (X-Device-Name, X-Device-Token, X-User-Name)
-    link_headers = dict(mock_device["headers"])
-    link_headers["X-User-Name"] = username
+    # Link device to user — POST /devices/link requires all 4 headers (X-Device-Name, X-Device-Token, X-User-Name, X-User-Token)
+    link_headers = {
+        "X-Device-Name": mock_device["device_name"],
+        "X-Device-Token": mock_device["device_token"],
+        "X-User-Name": username,
+        "X-User-Token": password_hash,
+    }
 
     link_res = client.post(
         "/api/v1/devices/link",
         json={
             "device_name": mock_device["device_name"],
-            "device_token": mock_device["device_token"],
             "username": username,
         },
         headers=link_headers,
     )
     assert link_res.status_code == 200
 
-    headers = dict(mock_device["headers"])
-    headers["X-User-Name"] = username
+    # User-authenticated headers (X-User-Name, X-User-Token)
+    headers = {
+        "X-User-Name": username,
+        "X-User-Token": password_hash,
+    }
 
     session_info = {
         "user_id": user_id,
         "username": username,
         "email": email,
+        "password_hash": password_hash,
         "headers": headers,
+        "link_headers": link_headers,
         "device_id": mock_device["device_name"],
         "device_name": mock_device["device_name"],
         "device_token": mock_device["device_token"],

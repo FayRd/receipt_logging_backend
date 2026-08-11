@@ -105,18 +105,15 @@ class DeviceRepository:
         data["username"] = req.username if resolved_user_id else None
         return data
 
-    async def link_user(
-        self, device_name: str, device_token: str, username: str | None
+    async def link_user_by_names(
+        self, device_name: str, username: str | None
     ) -> dict | None:
-        """Link or unlink a device to a user account by username."""
+        """Link or unlink a device to a user account by device_name and username.
+
+        Pre-requisite: Identity headers have already been verified by require_link_bridge_identity dependency.
+        """
         existing = await self.get_by_device_id(device_name)
         if not existing:
-            return None
-
-        incoming_hash = hash_device_token(device_token)
-        stored_hash = existing.get("device_token_hash", "")
-
-        if not secrets.compare_digest(incoming_hash.encode("utf-8"), stored_hash.encode("utf-8")):
             return None
 
         canonical_name = existing["name"]
@@ -137,7 +134,7 @@ class DeviceRepository:
                     "link_device_and_migrate_guest_data",
                     {
                         "p_device_name": canonical_name,
-                        "p_device_token_hash": incoming_hash,
+                        "p_device_token_hash": existing.get("device_token_hash", ""),
                         "p_user_id": resolved_user_id,
                     },
                 ).execute()
@@ -189,6 +186,12 @@ class DeviceRepository:
         if updated_device:
             updated_device["username"] = username if resolved_user_id else None
         return updated_device
+
+    async def link_user(
+        self, device_name: str, device_token: str, username: str | None
+    ) -> dict | None:
+        """Backward compatible wrapper around link_user_by_names."""
+        return await self.link_user_by_names(device_name, username)
 
     # ── SOFT DELETE ───────────────────────────────────────────────────────────
 

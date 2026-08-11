@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from supabase import AsyncClient
 from src.Infrastructure.database import get_supabase_client
-from src.Auth.identity import Identity, get_current_identity, require_link_identity
+from src.Auth.identity import Identity, get_device_identity, require_link_bridge_identity
 from src.Auth.rate_limiter import rate_limit
 from src.Models.schemas import (
     DeviceRegisterRequest,
@@ -30,8 +30,6 @@ async def register_device(
 ):
     """Register a new device hardware/variant name and fingerprint token, or refresh an existing one.
 
-    Idempotent — calling with the same device_name updates the token and user association.
-    Rate limited to protect against device registration spam.
     Public route — no authentication headers required.
     """
     device = await repo.register_or_update(body)
@@ -50,12 +48,12 @@ async def register_device(
     dependencies=[Depends(rate_limit(lambda s: s.rate_limit_crud_per_minute))],
 )
 async def get_my_device(
-    identity: Identity = Depends(get_current_identity),
+    identity: Identity = Depends(get_device_identity),
     repo: DeviceRepository = Depends(get_repo),
 ):
     """Retrieve the device record for the calling device's X-Device-Name.
 
-    Requires valid X-Device-Name and X-Device-Token headers. Omits X-User-Name.
+    Requires valid X-Device-Name and X-Device-Token headers. Omits X-User-Name and X-User-Token.
     """
     device = await repo.get_by_device_id(identity.device_name)
     if not device:
@@ -71,12 +69,12 @@ async def get_my_device(
 )
 async def link_device_user(
     body: DeviceLinkRequest,
-    identity: Identity = Depends(require_link_identity),
+    identity: Identity = Depends(require_link_bridge_identity),
     repo: DeviceRepository = Depends(get_repo),
 ):
     """Link a device to a user account by username, or pass username=null to unlink (guest mode).
 
-    Requires ALL THREE authentication headers: X-Device-Name, X-Device-Token, X-User-Name.
+    Requires ALL FOUR authentication headers: X-Device-Name, X-Device-Token, X-User-Name, X-User-Token.
     Enforces that body.device_name matches identity.device_name to prevent cross-device hijacking.
     """
     target_device = await repo.get_by_device_id(body.device_name)
@@ -86,11 +84,11 @@ async def link_device_user(
             detail="Cannot modify link status for another device_name.",
         )
 
-    device = await repo.link_user(body.device_name, body.device_token, body.username)
+    device = await repo.link_user_by_names(body.device_name, body.username)
     if not device:
         raise HTTPException(
             status_code=401,
-            detail="Device not registered or invalid device token.",
+            detail="Device not registered or invalid user credentials.",
         )
     return device
 
@@ -102,12 +100,12 @@ async def link_device_user(
     dependencies=[Depends(rate_limit(lambda s: s.rate_limit_crud_per_minute))],
 )
 async def delete_my_device(
-    identity: Identity = Depends(get_current_identity),
+    identity: Identity = Depends(get_device_identity),
     repo: DeviceRepository = Depends(get_repo),
 ):
     """Soft-delete calling device registration record.
 
-    Requires valid X-Device-Name and X-Device-Token headers. Omits X-User-Name.
+    Requires valid X-Device-Name and X-Device-Token headers. Omits user headers.
     """
     deleted = await repo.soft_delete(identity.device_name)
     if not deleted:

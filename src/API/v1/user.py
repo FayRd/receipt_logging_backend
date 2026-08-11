@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from supabase import AsyncClient
 from src.Infrastructure.database import get_supabase_client
-from src.Auth.identity import Identity, get_current_identity, require_user_identity
+from src.Auth.identity import Identity, get_user_identity
 from src.Auth.rate_limiter import rate_limit
 from src.Models.schemas import (
     UserCreateRequest,
@@ -89,13 +89,12 @@ async def login_user(
     dependencies=[Depends(rate_limit(lambda s: s.rate_limit_crud_per_minute))],
 )
 async def get_my_profile(
-    identity: Identity = Depends(require_user_identity),
+    identity: Identity = Depends(get_user_identity),
     repo: UserRepository = Depends(get_repo),
 ):
     """Retrieve the current authenticated user's profile.
 
-    Requires X-Device-ID, X-Device-Token, and X-User-ID headers.
-    Returns 401 if not signed in.
+    Requires X-User-Name and X-User-Token headers. Omits device headers.
     """
     user = await repo.get_by_id(identity.user_id)
     if not user:
@@ -111,14 +110,14 @@ async def get_my_profile(
 )
 async def update_my_profile(
     body: UserUpdateRequest,
-    identity: Identity = Depends(require_user_identity),
+    identity: Identity = Depends(get_user_identity),
     repo: UserRepository = Depends(get_repo),
 ):
     """Update mutable profile fields for the authenticated user.
 
     All fields are optional — only supplied (non-null) values are written.
     Rejects duplicate emails (case-insensitive) with HTTP 409.
-    Requires X-Device-ID, X-Device-Token, and X-User-ID headers.
+    Requires X-User-Name and X-User-Token headers. Omits device headers.
     """
     if body.email is not None:
         existing = await repo.get_by_email(body.email)
@@ -138,12 +137,12 @@ async def update_my_profile(
     dependencies=[Depends(rate_limit(lambda s: s.rate_limit_crud_per_minute))],
 )
 async def delete_my_profile(
-    identity: Identity = Depends(require_user_identity),
+    identity: Identity = Depends(get_user_identity),
     repo: UserRepository = Depends(get_repo),
 ):
     """Soft-delete current authenticated user profile.
 
-    Requires authenticated user session (X-User-ID header). Returns 401 if guest.
+    Requires X-User-Name and X-User-Token headers. Omits device headers.
     """
     deleted = await repo.soft_delete(identity.user_id)
     if not deleted:

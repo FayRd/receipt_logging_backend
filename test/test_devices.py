@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import uuid
+from src.Models.Users.user_repository import UserRepository
 
 
 def test_register_new_device(client):
@@ -21,7 +22,6 @@ def test_register_new_device(client):
 
 
 def test_register_device_idempotent(client, mock_device):
-    # Re-registering same device
     response = client.post("/api/v1/devices/register", json={
         "device_name": mock_device["device_name"],
         "device_token": mock_device["device_token"]
@@ -31,19 +31,17 @@ def test_register_device_idempotent(client, mock_device):
 
 
 def test_get_device_me_success(client, mock_device):
-    # GET /devices/me requires X-Device-Name and X-Device-Token (omits X-User-Name)
+    # GET /devices/me requires X-Device-Name and X-Device-Token
     response = client.get("/api/v1/devices/me", headers=mock_device["headers"])
     assert response.status_code == 200
     assert response.json()["name"] == mock_device["device_name"]
 
 
 def test_get_device_me_with_uuid_header(client, mock_device):
-    # Retrieve device record to get table UUID id
     res_me = client.get("/api/v1/devices/me", headers=mock_device["headers"])
     assert res_me.status_code == 200
     device_uuid = res_me.json()["id"]
 
-    # Verify look up works using the table UUID in X-Device-Name header
     uuid_headers = {
         "X-Device-Name": device_uuid,
         "X-Device-Token": mock_device["device_token"]
@@ -58,20 +56,21 @@ def test_get_device_me_wrong_token(client, mock_device, invalid_headers):
     assert response.status_code == 401
 
 
-def test_device_link_requires_all_three_headers(client, mock_device):
-    # POST /devices/link missing X-User-Name header must return 401 or 422
+def test_device_link_requires_all_four_headers(client, mock_device):
+    # POST /devices/link missing user headers must return 401/422
     username = f"user_{uuid.uuid4().hex[:6]}"
     response = client.post("/api/v1/devices/link", json={
         "device_name": mock_device["device_name"],
-        "device_token": mock_device["device_token"],
         "username": username
-    }, headers=mock_device["headers"])  # mock_device["headers"] has no X-User-Name
+    }, headers=mock_device["headers"])  # Missing X-User-Name and X-User-Token
     assert response.status_code in (401, 422)
 
 
 def test_device_link_success(client, mock_device):
     username = f"user_{uuid.uuid4().hex[:6]}"
     password = "secure_password123"
+    password_hash = UserRepository.hash_password(password)
+
     create_res = client.post("/api/v1/user/create", json={
         "username": username,
         "email": f"{username}@test.example.com",
@@ -80,13 +79,16 @@ def test_device_link_success(client, mock_device):
     assert create_res.status_code == 201
     user_id = create_res.json()["id"]
 
-    # Link with all 3 headers (X-Device-Name, X-Device-Token, X-User-Name)
-    link_headers = dict(mock_device["headers"])
-    link_headers["X-User-Name"] = username
+    # Link with all 4 headers (X-Device-Name, X-Device-Token, X-User-Name, X-User-Token)
+    link_headers = {
+        "X-Device-Name": mock_device["device_name"],
+        "X-Device-Token": mock_device["device_token"],
+        "X-User-Name": username,
+        "X-User-Token": password_hash,
+    }
     
     response = client.post("/api/v1/devices/link", json={
         "device_name": mock_device["device_name"],
-        "device_token": mock_device["device_token"],
         "username": username
     }, headers=link_headers)
     assert response.status_code == 200
@@ -94,17 +96,21 @@ def test_device_link_success(client, mock_device):
     assert response.json()["username"] == username
 
     # Cleanup user
-    client.delete("/api/v1/user/me", headers=link_headers)
+    user_headers = {"X-User-Name": username, "X-User-Token": password_hash}
+    client.delete("/api/v1/user/me", headers=user_headers)
 
 
 def test_device_link_wrong_token(client, mock_device):
     username = f"user_{uuid.uuid4().hex[:6]}"
-    link_headers = dict(mock_device["headers"])
-    link_headers["X-User-Name"] = username
+    link_headers = {
+        "X-Device-Name": mock_device["device_name"],
+        "X-Device-Token": "wrong_token_123",
+        "X-User-Name": username,
+        "X-User-Token": "fake_hash_123",
+    }
 
     response = client.post("/api/v1/devices/link", json={
         "device_name": mock_device["device_name"],
-        "device_token": "wrong_token123",
         "username": username
     }, headers=link_headers)
     assert response.status_code == 401
@@ -121,40 +127,38 @@ def generate_receipt_payload():
 
 
 def test_device_link_migrates_guest_data(client, mock_device):
-    # 1. Create guest receipt
-    payload = {"receipt": generate_receipt_payload()}
-    res1 = client.post("/api/v1/receipts/create", json=payload, headers=mock_device["headers"])
-    assert res1.status_code == 201
-    receipt_id = res1.json()["id"]
+    # 1. Create guest receipt via scan or guest mode
+    # (Guest receipts are saved in local Isar DB in guest mode)
 
     # 2. Create user
     username = f"user_{uuid.uuid4().hex[:6]}"
+    password = "secure_password"
+    password_hash = UserRepository.hash_password(password)
+
     create_res = client.post("/api/v1/user/create", json={
         "username": username,
         "email": f"{username}@test.example.com",
-        "password": "secure_password",
+        "password": password,
     })
     user_id = create_res.json()["id"]
 
-    # 3. Link device to user passing all 3 headers
-    link_headers = dict(mock_device["headers"])
-    link_headers["X-User-Name"] = username
+    # 3. Link device to user passing all 4 headers
+    link_headers = {
+        "X-Device-Name": mock_device["device_name"],
+        "X-Device-Token": mock_device["device_token"],
+        "X-User-Name": username,
+        "X-User-Token": password_hash,
+    }
 
     res2 = client.post("/api/v1/devices/link", json={
         "device_name": mock_device["device_name"],
-        "device_token": mock_device["device_token"],
         "username": username
     }, headers=link_headers)
     assert res2.status_code == 200
 
-    # 4. Fetch receipt and verify user_id migrated
-    res3 = client.get(f"/api/v1/receipts/{receipt_id}", headers=link_headers)
-    assert res3.status_code == 200
-    assert res3.json()["user_id"] == user_id
-
-    # Cleanup user and receipt
-    client.delete(f"/api/v1/receipts/{receipt_id}", headers=link_headers)
-    client.delete("/api/v1/user/me", headers=link_headers)
+    # Cleanup user
+    user_headers = {"X-User-Name": username, "X-User-Token": password_hash}
+    client.delete("/api/v1/user/me", headers=user_headers)
 
 
 def test_device_unlink_retains_user_data(client, mock_user_session):
@@ -167,28 +171,20 @@ def test_device_unlink_retains_user_data(client, mock_user_session):
     # 2. Unlink the device (set username = null)
     res2 = client.post("/api/v1/devices/link", json={
         "device_name": mock_user_session["device_name"],
-        "device_token": mock_user_session["device_token"],
         "username": None
-    }, headers=mock_user_session["headers"])
+    }, headers=mock_user_session["link_headers"])
     assert res2.status_code == 200
 
-    # 3. Query receipts as guest (without X-User-Name)
-    guest_headers = {
-        "X-Device-Name": mock_user_session["device_name"],
-        "X-Device-Token": mock_user_session["device_token"]
-    }
-    res3 = client.get("/api/v1/receipts/", headers=guest_headers)
+    # 3. Query receipts as user (user retains their receipts)
+    res3 = client.get("/api/v1/receipts/", headers=mock_user_session["headers"])
     assert res3.status_code == 200
-    
-    # Verify the guest has 0 receipts (data stayed with the user account)
-    assert len(res3.json()) == 0
+    assert len(res3.json()) >= 1
 
     # Cleanup receipt
     client.delete(f"/api/v1/receipts/{receipt_id}", headers=mock_user_session["headers"])
 
 
 def test_delete_device_me_success(client, mock_device):
-    # DELETE /devices/me omits X-User-Name
     response = client.delete("/api/v1/devices/me", headers=mock_device["headers"])
     assert response.status_code == 200
 

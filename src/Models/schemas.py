@@ -236,12 +236,11 @@ class DeviceRegisterRequest(BaseModel):
 class DeviceLinkRequest(BaseModel):
     """Request body for linking/unlinking a device to a user account.
 
-    device_name accepts either the device name string (e.g. MS701-A1B1) or table UUID id.
-    device_token is required for ownership verification before modifying the link.
+    device_name is the hardware or session variant name string (e.g. MS701-A1B1).
     username specifies target user account to link, or null to unlink (guest mode).
+    Tokens are supplied exclusively via X-Device-Token and X-User-Token HTTP headers.
     """
     device_name: str = Field(..., min_length=3, max_length=100)
-    device_token: str = Field(..., min_length=8, max_length=256)
     username: str | None = None  # None unlinks the user (guest mode)
 
 

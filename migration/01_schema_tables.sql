@@ -1,5 +1,5 @@
 -- 01_schema_tables.sql
--- Idempotent schema initialization for all 5 database tables
+-- Idempotent schema initialization for all 6 database tables
 
 -- 1. Users Table
 CREATE TABLE IF NOT EXISTS users (

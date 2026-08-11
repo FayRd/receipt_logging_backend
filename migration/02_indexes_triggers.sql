@@ -8,7 +8,9 @@ CREATE INDEX IF NOT EXISTS idx_users_mobile ON users (mobile_number) WHERE delet
 CREATE INDEX IF NOT EXISTS idx_devices_hardware ON devices (device_id) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_devices_user ON devices (user_id) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_receipts_identity ON receipts (device_id, user_id) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_receipts_guest_migration ON receipts (device_id) WHERE user_id IS NULL AND deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_conversations_identity ON conversations (device_id, user_id) WHERE deleted_at IS NULL;
+CREATE INDEX IF NOT EXISTS idx_conversations_guest_migration ON conversations (device_id) WHERE user_id IS NULL AND deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_chat_messages_conv ON chat_messages (conversation_id, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_forget_password_user ON forget_password (user_id) WHERE is_used IS FALSE;
 CREATE INDEX IF NOT EXISTS idx_forget_password_token ON forget_password (reset_token_hash) WHERE is_used IS FALSE;
@@ -56,7 +58,54 @@ CREATE TRIGGER check_conversation_cap
 BEFORE INSERT ON conversations
 FOR EACH ROW EXECUTE FUNCTION enforce_max_conversations();
 
--- ── 4. RPC FUNCTION: SECURE USER SOFT-DELETE WITH SESSION UNLINKING ──────────
+-- ── 4. RPC FUNCTION: ATOMIC DEVICE LINK & GUEST DATA MIGRATION ───────────────
+CREATE OR REPLACE FUNCTION link_device_and_migrate_guest_data(
+    p_device_id TEXT,
+    p_device_token TEXT,
+    p_user_id UUID
+)
+RETURNS JSONB AS $$
+DECLARE
+    v_device_record RECORD;
+    v_migrated_receipts INT := 0;
+    v_migrated_convs INT := 0;
+BEGIN
+    -- 1. Verify device exists & token matches
+    SELECT * INTO v_device_record FROM devices 
+    WHERE device_id = p_device_id AND deleted_at IS NULL;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Device not found.';
+    END IF;
+
+    IF v_device_record.device_token != p_device_token THEN
+        RAISE EXCEPTION 'Invalid device token.';
+    END IF;
+
+    -- 2. Update device ownership
+    UPDATE devices SET user_id = p_user_id WHERE id = v_device_record.id;
+
+    -- 3. Migrate un-owned guest receipts for this device to the user account
+    UPDATE receipts 
+    SET user_id = p_user_id 
+    WHERE device_id = p_device_id AND user_id IS NULL AND deleted_at IS NULL;
+    GET DIAGNOSTICS v_migrated_receipts = ROW_COUNT;
+
+    -- 4. Migrate un-owned guest conversations for this device to the user account
+    UPDATE conversations 
+    SET user_id = p_user_id 
+    WHERE device_id = p_device_id AND user_id IS NULL AND deleted_at IS NULL;
+    GET DIAGNOSTICS v_migrated_convs = ROW_COUNT;
+
+    RETURN jsonb_build_object(
+        'success', true,
+        'migrated_receipts', v_migrated_receipts,
+        'migrated_conversations', v_migrated_convs
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- ── 5. RPC FUNCTION: SECURE USER SOFT-DELETE WITH SESSION UNLINKING ──────────
 CREATE OR REPLACE FUNCTION soft_delete_user(target_user_id UUID)
 RETURNS BOOLEAN AS $$
 DECLARE
@@ -77,30 +126,3 @@ BEGIN
   RETURN FALSE;
 END;
 $$ LANGUAGE plpgsql SECURITY DEFINER;
-
--- ── 5. FORGET PASSWORD RLS POLICIES & PERMISSIONS ────────────────────────────
-ALTER TABLE forget_password ENABLE ROW LEVEL SECURITY;
-
-GRANT SELECT, INSERT, UPDATE ON TABLE forget_password TO anon, authenticated, service_role;
-
-DROP POLICY IF EXISTS "Allow anon and authenticated to insert forget_password" ON forget_password;
-CREATE POLICY "Allow anon and authenticated to insert forget_password"
-ON forget_password
-FOR INSERT
-TO anon, authenticated, service_role
-WITH CHECK (true);
-
-DROP POLICY IF EXISTS "Allow anon and authenticated to select forget_password" ON forget_password;
-CREATE POLICY "Allow anon and authenticated to select forget_password"
-ON forget_password
-FOR SELECT
-TO anon, authenticated, service_role
-USING (true);
-
-DROP POLICY IF EXISTS "Allow anon and authenticated to update forget_password" ON forget_password;
-CREATE POLICY "Allow anon and authenticated to update forget_password"
-ON forget_password
-FOR UPDATE
-TO anon, authenticated, service_role
-USING (true)
-WITH CHECK (true);

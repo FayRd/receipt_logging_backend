@@ -133,18 +133,18 @@ def test_user_me_unauthorized(client, mock_device):
 
 
 def test_user_me_missing_x_user_id_on_linked_device(client, mock_user_session):
-    # Device is linked to user in DB, but client omits X-User-ID header
+    # Device is linked to user in DB, but client omits X-User-Name header
     incomplete_headers = {
-        "X-Device-ID": mock_user_session["headers"]["X-Device-ID"],
+        "X-Device-Name": mock_user_session["headers"]["X-Device-Name"],
         "X-Device-Token": mock_user_session["headers"]["X-Device-Token"],
     }
     get_res = client.get("/api/v1/user/me", headers=incomplete_headers)
     assert get_res.status_code == 401
-    assert "Header X-User-ID is required" in get_res.json()["detail"]
+    assert "Header X-User-Name is required" in get_res.json()["detail"]
 
     del_res = client.delete("/api/v1/user/me", headers=incomplete_headers)
     assert del_res.status_code == 401
-    assert "Header X-User-ID is required" in del_res.json()["detail"]
+    assert "Header X-User-Name is required" in del_res.json()["detail"]
 
 
 # ── PATCH /user/me ─────────────────────────────────────────────────────────────

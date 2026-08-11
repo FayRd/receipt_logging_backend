@@ -34,19 +34,25 @@ ALTER TABLE IF EXISTS devices DISABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS users DISABLE ROW LEVEL SECURITY;
 
 -- 3. Drop Triggers
+DROP TRIGGER IF EXISTS update_conversations_updated_at ON conversations;
+DROP TRIGGER IF EXISTS update_receipts_updated_at ON receipts;
+DROP TRIGGER IF EXISTS update_devices_updated_at ON devices;
+DROP TRIGGER IF EXISTS update_users_updated_at ON users;
 DROP TRIGGER IF EXISTS chat_messages_update_conversation ON chat_messages;
 DROP TRIGGER IF EXISTS check_conversation_cap ON conversations;
 
 -- 4. Drop Trigger & RPC Functions
 DROP FUNCTION IF EXISTS link_device_and_migrate_guest_data(TEXT, TEXT, UUID);
+DROP FUNCTION IF EXISTS soft_delete_user(UUID);
+DROP FUNCTION IF EXISTS set_updated_at_column();
 DROP FUNCTION IF EXISTS update_conversation_updated_at();
 DROP FUNCTION IF EXISTS enforce_max_conversations();
-DROP FUNCTION IF EXISTS soft_delete_user(UUID);
 
 -- 5. Drop Indexes
 DROP INDEX IF EXISTS idx_forget_password_token;
 DROP INDEX IF EXISTS idx_forget_password_user;
 DROP INDEX IF EXISTS idx_conversations_guest_migration;
+DROP INDEX IF EXISTS idx_receipts_updated_at;
 DROP INDEX IF EXISTS idx_receipts_guest_migration;
 DROP INDEX IF EXISTS idx_chat_messages_conv;
 DROP INDEX IF EXISTS idx_conversations_identity;

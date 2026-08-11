@@ -1,6 +1,12 @@
+import logging
 import secrets
+import uuid
 from supabase import AsyncClient
+from src.Auth.device_security import hash_device_token
 from src.Models.schemas import DeviceRegisterRequest
+from src.Models.Users.user_repository import UserRepository
+
+logger = logging.getLogger(__name__)
 
 
 class DeviceRepository:
@@ -11,17 +17,36 @@ class DeviceRepository:
 
     # ── READS ─────────────────────────────────────────────────────────────────
 
-    async def get_by_device_id(self, device_id: str) -> dict | None:
-        """Fetch active device record by hardware device_id string."""
+    async def get_by_device_id(self, device_name_or_uuid: str) -> dict | None:
+        """Fetch active device record by hardware name string or table UUID id."""
+        clean_name = device_name_or_uuid.strip()
+
+        # 1. Search by devices.name column
         res = await (
             self.db.table(self.TABLE)
             .select("*")
-            .eq("device_id", device_id.strip())
+            .eq("name", clean_name)
             .is_("deleted_at", "null")
             .maybe_single()
             .execute()
         )
-        return res.data if res else None
+        if res and res.data:
+            return res.data
+
+        # 2. Fallback: Search by table UUID id if clean_name is a valid UUID
+        try:
+            uuid.UUID(clean_name)
+            res_uuid = await (
+                self.db.table(self.TABLE)
+                .select("*")
+                .eq("id", clean_name)
+                .is_("deleted_at", "null")
+                .maybe_single()
+                .execute()
+            )
+            return res_uuid.data if res_uuid else None
+        except ValueError:
+            return None
 
     async def get_by_user_id(self, user_id: str) -> list[dict]:
         """Fetch all active devices linked to a specific user_id."""
@@ -37,29 +62,27 @@ class DeviceRepository:
     # ── WRITES ────────────────────────────────────────────────────────────────
 
     async def register_or_update(self, req: DeviceRegisterRequest) -> dict:
-        """Register new device or update token/user_id if device already exists.
+        """Register new device or update token_hash/user_id if device already exists."""
+        clean_name = req.device_name.strip()
+        incoming_hash = hash_device_token(req.device_token)
 
-        Idempotent by hardware device_id. On re-registration (e.g. app reinstall),
-        token updates on an existing device are only allowed if the caller presents
-        the correct stored token (verified via secrets.compare_digest in constant time)
-        to prevent unauthenticated device takeover attacks.
-        """
-        clean_id = req.device_id.strip()
-        clean_token = req.device_token.strip()
+        # Resolve optional username to user_id
+        resolved_user_id = None
+        if req.username:
+            user_repo = UserRepository(self.db)
+            user_row = await user_repo.get_by_identifier(req.username)
+            if user_row:
+                resolved_user_id = user_row["id"]
 
-        existing = await self.get_by_device_id(clean_id)
+        existing = await self.get_by_device_id(clean_name)
         if existing:
-            # Constant-time comparison prevents token guessing & unauthorized device takeover
-            stored_bytes = existing["device_token"].encode("utf-8")
-            incoming_bytes = clean_token.encode("utf-8")
-
-            if not secrets.compare_digest(incoming_bytes, stored_bytes):
-                # Fail closed — return None to prevent user_id enumeration & fake 201s
+            stored_hash = existing.get("device_token_hash", "")
+            if not secrets.compare_digest(incoming_hash.encode("utf-8"), stored_hash.encode("utf-8")):
                 return None
 
-            updates: dict = {"device_token": clean_token}
-            if req.user_id is not None:
-                updates["user_id"] = req.user_id
+            updates: dict = {"device_token_hash": incoming_hash}
+            if resolved_user_id is not None:
+                updates["user_id"] = resolved_user_id
 
             res = await (
                 self.db.table(self.TABLE)
@@ -67,86 +90,121 @@ class DeviceRepository:
                 .eq("id", existing["id"])
                 .execute()
             )
-            return res.data[0]
+            data = res.data[0]
+            data["username"] = req.username if resolved_user_id else None
+            return data
 
+        # Fresh device registration
         row = {
-            "device_id": clean_id,
-            "device_token": clean_token,
-            "user_id": req.user_id,
+            "name": clean_name,
+            "device_token_hash": incoming_hash,
+            "user_id": resolved_user_id,
         }
         res = await self.db.table(self.TABLE).insert(row).execute()
-        return res.data[0]
+        data = res.data[0]
+        data["username"] = req.username if resolved_user_id else None
+        return data
 
     async def link_user(
-        self, device_id: str, device_token: str, user_id: str | None
+        self, device_name: str, device_token: str, username: str | None
     ) -> dict | None:
-        """Link or unlink a device to a user account.
-
-        When user_id is non-null (linking/login):
-        1. Verifies device token in constant time (secrets.compare_digest).
-        2. Updates devices table user_id.
-        3. Atomically migrates all guest receipts (user_id IS NULL) for this device_id to user_id.
-        4. Atomically migrates all guest conversations (user_id IS NULL) for this device_id to user_id.
-
-        When user_id is null (unlinking/logout):
-        1. Updates devices table user_id = NULL.
-        2. Receipts and conversations remain owned by their respective user_id, ensuring
-           complete data isolation and privacy for guest sessions.
-        """
-        clean_device_id = device_id.strip()
-        clean_device_token = device_token.strip()
-
-        existing = await self.get_by_device_id(clean_device_id)
+        """Link or unlink a device to a user account by username."""
+        existing = await self.get_by_device_id(device_name)
         if not existing:
             return None
 
-        # Constant-time token verification prevents timing attacks and guest data hijacking
-        stored_bytes = existing.get("device_token", "").encode("utf-8")
-        incoming_bytes = clean_device_token.encode("utf-8")
+        incoming_hash = hash_device_token(device_token)
+        stored_hash = existing.get("device_token_hash", "")
 
-        if not secrets.compare_digest(incoming_bytes, stored_bytes):
+        if not secrets.compare_digest(incoming_hash.encode("utf-8"), stored_hash.encode("utf-8")):
             return None
 
+        canonical_name = existing["name"]
+
+        # Resolve target username to user_id
+        resolved_user_id = None
+        if username:
+            user_repo = UserRepository(self.db)
+            user_row = await user_repo.get_by_identifier(username)
+            if not user_row:
+                return None
+            resolved_user_id = user_row["id"]
+
+        # When linking to a user account, invoke atomic RPC for guest data migration
+        if resolved_user_id:
+            try:
+                rpc_res = await self.db.rpc(
+                    "link_device_and_migrate_guest_data",
+                    {
+                        "p_device_name": canonical_name,
+                        "p_device_token_hash": incoming_hash,
+                        "p_user_id": resolved_user_id,
+                    },
+                ).execute()
+                if rpc_res and rpc_res.data:
+                    migrated = rpc_res.data
+                    logger.info(
+                        "Atomic guest migration complete for device name=%s: "
+                        "receipts=%s conversations=%s",
+                        canonical_name,
+                        migrated.get("migrated_receipts", 0),
+                        migrated.get("migrated_conversations", 0),
+                    )
+                    updated = await self.get_by_device_id(existing["id"])
+                    if updated:
+                        updated["username"] = username
+                    return updated
+            except Exception as exc:
+                logger.warning(
+                    "RPC link_device_and_migrate_guest_data failed for device name=%s: %s",
+                    canonical_name,
+                    exc,
+                )
+
+        # Sequential update fallback
         res = await (
             self.db.table(self.TABLE)
-            .update({"user_id": user_id})
+            .update({"user_id": resolved_user_id})
             .eq("id", existing["id"])
             .execute()
         )
         updated_device = res.data[0] if res else None
 
-        # If linking to a user account, claim all orphan guest receipts and conversations
-        if user_id and updated_device:
-            # Migrate guest receipts
+        if resolved_user_id and updated_device:
             await (
                 self.db.table("receipts")
-                .update({"user_id": user_id})
-                .eq("device_id", clean_device_id)
+                .update({"user_id": resolved_user_id})
+                .eq("device_id", canonical_name)
                 .is_("user_id", "null")
                 .execute()
             )
-            # Migrate guest conversations
             await (
                 self.db.table("conversations")
-                .update({"user_id": user_id})
-                .eq("device_id", clean_device_id)
+                .update({"user_id": resolved_user_id})
+                .eq("device_id", canonical_name)
                 .is_("user_id", "null")
                 .execute()
             )
 
+        if updated_device:
+            updated_device["username"] = username if resolved_user_id else None
         return updated_device
 
     # ── SOFT DELETE ───────────────────────────────────────────────────────────
 
-    async def soft_delete(self, device_id: str) -> bool:
+    async def soft_delete(self, device_name_or_uuid: str) -> bool:
         """Soft-delete device record by setting deleted_at to now(). Returns True if affected."""
         from datetime import datetime, timezone
+
+        existing = await self.get_by_device_id(device_name_or_uuid)
+        if not existing:
+            return False
 
         now = datetime.now(timezone.utc).isoformat()
         res = await (
             self.db.table(self.TABLE)
             .update({"deleted_at": now})
-            .eq("device_id", device_id.strip())
+            .eq("id", existing["id"])
             .is_("deleted_at", "null")
             .execute()
         )

@@ -4,12 +4,16 @@ from pydantic import BaseModel
 from supabase import AsyncClient
 from src.Infrastructure.database import get_supabase_client
 from src.Models.Devices.device_repository import DeviceRepository
+from src.Models.Users.user_repository import UserRepository
+from src.Auth.device_security import hash_device_token
 
 
 class Identity(BaseModel):
     """Container for caller's cryptographically verified session identity."""
     user_id: str | None = None
-    device_id: str
+    username: str | None = None
+    device_id: str  # Device name string, e.g. MS701-A1B1
+    device_name: str  # Device name string, e.g. MS701-A1B1
 
     @property
     def is_authenticated(self) -> bool:
@@ -18,47 +22,43 @@ class Identity(BaseModel):
 
 
 async def get_current_identity(
-    x_device_id: str = Header(
+    x_device_name: str = Header(
         ...,
-        alias="X-Device-ID",
-        description="Mobile hardware device identifier string.",
+        alias="X-Device-Name",
+        description="Mobile hardware/variant device name identifier string.",
     ),
     x_device_token: str = Header(
         ...,
         alias="X-Device-Token",
         description="Device secret fingerprint token generated on first app boot.",
     ),
-    x_user_id: str | None = Header(
+    x_user_name: str | None = Header(
         None,
-        alias="X-User-ID",
-        description="Authenticated user UUID — supplied only when signed in.",
+        alias="X-User-Name",
+        description="Authenticated username string — supplied when signed in.",
     ),
     db: AsyncClient = Depends(get_supabase_client),
 ) -> Identity:
     """FastAPI dependency that parses and cryptographically verifies the caller's identity.
 
     Verification sequence:
-    1. Validate that X-Device-ID and X-Device-Token headers are non-empty.
-    2. Look up the device row in Supabase.
-    3. Compare X-Device-Token to the stored device_token using secrets.compare_digest
-       (constant-time comparison, immune to timing attacks).
-    4. Return Identity scoped to user (if X-User-ID present) or guest device.
-
-    Raises HTTP 400 if required headers are missing/empty.
-    Raises HTTP 401 if device is unregistered or token does not match.
+    1. Validate that X-Device-Name and X-Device-Token headers are non-empty.
+    2. Look up the device row in Supabase by name (or UUID id).
+    3. Hash X-Device-Token with HMAC-SHA256 and compare against stored device_token_hash.
+    4. Validate optional X-User-Name against linked DB user session.
     """
-    clean_device_id = x_device_id.strip()
+    clean_device_name = x_device_name.strip()
     clean_device_token = x_device_token.strip()
 
-    if not clean_device_id or not clean_device_token:
+    if not clean_device_name or not clean_device_token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="X-Device-ID and X-Device-Token headers are required and cannot be empty.",
+            detail="X-Device-Name and X-Device-Token headers are required and cannot be empty.",
         )
 
-    # Look up device row in DB
+    # Look up device row in DB (supports devices.name or UUID devices.id)
     device_repo = DeviceRepository(db)
-    device = await device_repo.get_by_device_id(clean_device_id)
+    device = await device_repo.get_by_device_id(clean_device_name)
 
     if not device:
         raise HTTPException(
@@ -66,11 +66,12 @@ async def get_current_identity(
             detail="Unregistered device. Please call POST /api/v1/devices/register first.",
         )
 
-    # Constant-time comparison guards against timing-based token guessing attacks
-    stored_token_bytes = device["device_token"].encode("utf-8")
-    incoming_token_bytes = clean_device_token.encode("utf-8")
+    # Hash incoming plaintext token using HMAC-SHA256
+    incoming_hash = hash_device_token(clean_device_token)
+    stored_hash = device.get("device_token_hash", "")
 
-    if not secrets.compare_digest(incoming_token_bytes, stored_token_bytes):
+    # Constant-time comparison guards against timing-based token guessing attacks
+    if not secrets.compare_digest(incoming_hash.encode("utf-8"), stored_hash.encode("utf-8")):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid device authentication token.",
@@ -78,36 +79,48 @@ async def get_current_identity(
 
     # Derive user_id strictly from database mapping (ground truth)
     db_user_id = device.get("user_id")
+    db_username = None
 
-    # If client passed X-User-ID header, verify it matches DB ground truth to prevent identity spoofing
-    clean_user_id = x_user_id.strip() if x_user_id and x_user_id.strip() else None
-    if clean_user_id and clean_user_id != db_user_id:
+    if db_user_id:
+        user_repo = UserRepository(db)
+        user_row = await user_repo.get_by_id(db_user_id)
+        if user_row:
+            db_username = user_row.get("username")
+
+    # If client passed X-User-Name header, verify it matches DB ground truth
+    clean_user_name = x_user_name.strip() if x_user_name and x_user_name.strip() else None
+    if clean_user_name and db_username and clean_user_name.lower() != db_username.lower():
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Header X-User-ID does not match authenticated user session for this device.",
+            detail="Header X-User-Name does not match authenticated user session for this device.",
         )
 
-    return Identity(user_id=db_user_id, device_id=clean_device_id)
+    canonical_name = device.get("name", clean_device_name)
+    return Identity(
+        user_id=db_user_id,
+        username=db_username,
+        device_id=canonical_name,
+        device_name=canonical_name,
+    )
 
 
 async def require_user_identity(
-    x_user_id: str | None = Header(
+    x_user_name: str | None = Header(
         None,
-        alias="X-User-ID",
-        description="Authenticated user UUID string — required for user-scoped endpoints.",
+        alias="X-User-Name",
+        description="Authenticated username string — required for user-scoped endpoints.",
     ),
     identity: Identity = Depends(get_current_identity),
 ) -> Identity:
-    """FastAPI dependency for routes that REQUIRE a fully authenticated user session AND explicit X-User-ID header.
+    """FastAPI dependency for routes that REQUIRE a fully authenticated user session AND explicit X-User-Name header.
 
-    Use this instead of get_current_identity on routes where guest access is not allowed.
-    Raises HTTP 401 if X-User-ID header is missing/empty or if caller is an anonymous guest device.
+    Raises HTTP 401 if X-User-Name header is missing/empty or if caller is an anonymous guest device.
     """
-    clean_user_id = x_user_id.strip() if x_user_id and x_user_id.strip() else None
-    if not clean_user_id:
+    clean_user_name = x_user_name.strip() if x_user_name and x_user_name.strip() else None
+    if not clean_user_name:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Header X-User-ID is required for user-authenticated endpoints.",
+            detail="Header X-User-Name is required for user-authenticated endpoints.",
         )
 
     if not identity.is_authenticated:
@@ -118,26 +131,41 @@ async def require_user_identity(
     return identity
 
 
+async def require_link_identity(
+    x_user_name: str = Header(
+        ...,
+        alias="X-User-Name",
+        description="Authenticated username string — required for POST /devices/link.",
+    ),
+    identity: Identity = Depends(get_current_identity),
+) -> Identity:
+    """FastAPI dependency for POST /devices/link enforcing that X-User-Name is explicitly provided in headers."""
+    clean_user_name = x_user_name.strip() if x_user_name and x_user_name.strip() else None
+    if not clean_user_name:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Header X-User-Name is required for device linking.",
+        )
+    return identity
+
+
 async def get_sse_identity(
     request: Request,
     db: AsyncClient = Depends(get_supabase_client),
 ) -> Identity:
-    """FastAPI dependency for SSE endpoints supporting both HTTP Headers and URL Query Parameters.
-    
-    This enables compatibility with standard browser EventSource APIs that cannot attach custom headers.
-    """
-    device_id = (request.headers.get("X-Device-ID") or request.query_params.get("device_id") or "").strip()
+    """FastAPI dependency for SSE endpoints supporting both HTTP Headers and URL Query Parameters."""
+    device_name = (request.headers.get("X-Device-Name") or request.headers.get("X-Device-ID") or request.query_params.get("device_name") or request.query_params.get("device_id") or "").strip()
     device_token = (request.headers.get("X-Device-Token") or request.query_params.get("device_token") or "").strip()
-    user_id = (request.headers.get("X-User-ID") or request.query_params.get("user_id") or "").strip() or None
+    username = (request.headers.get("X-User-Name") or request.headers.get("X-User-ID") or request.query_params.get("username") or request.query_params.get("user_id") or "").strip() or None
 
-    if not device_id or not device_token:
+    if not device_name or not device_token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Device authentication required via headers (X-Device-ID, X-Device-Token) or query parameters (device_id, device_token).",
+            detail="Device authentication required via headers (X-Device-Name, X-Device-Token) or query parameters.",
         )
 
     device_repo = DeviceRepository(db)
-    device = await device_repo.get_by_device_id(device_id)
+    device = await device_repo.get_by_device_id(device_name)
 
     if not device:
         raise HTTPException(
@@ -145,21 +173,15 @@ async def get_sse_identity(
             detail="Unregistered device.",
         )
 
-    stored_token_bytes = device["device_token"].encode("utf-8")
-    incoming_token_bytes = device_token.encode("utf-8")
+    incoming_hash = hash_device_token(device_token)
+    stored_hash = device.get("device_token_hash", "")
 
-    if not secrets.compare_digest(incoming_token_bytes, stored_token_bytes):
+    if not secrets.compare_digest(incoming_hash.encode("utf-8"), stored_hash.encode("utf-8")):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid device authentication token.",
         )
 
     db_user_id = device.get("user_id")
-    if user_id and user_id != db_user_id:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User ID mismatch.",
-        )
-
-    return Identity(user_id=db_user_id, device_id=device_id)
-
+    canonical_name = device.get("name", device_name)
+    return Identity(user_id=db_user_id, username=username, device_id=canonical_name, device_name=canonical_name)

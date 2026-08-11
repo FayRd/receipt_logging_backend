@@ -24,15 +24,40 @@ class ReceiptRepository:
 
     # ── READS ─────────────────────────────────────────────────────────────────
 
-    async def get_all_by_identity(self, identity: Identity) -> list[dict]:
-        """Return all non-deleted receipts owned by the caller's identity, newest first."""
+    async def get_all_by_identity(
+        self,
+        identity: Identity,
+        updated_after: str | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> list[dict]:
+        """Return all non-deleted receipts owned by the caller's identity.
+
+        Supports optional delta sync via `updated_after` (ISO 8601 timestamp),
+        and pagination via `limit` and `offset`.
+
+        Results are ordered by updated_at DESC so the most recently modified
+        receipts are returned first — this ensures edits are captured by clients
+        using delta-sync patterns.
+        """
         query = (
             self.db.table(self.TABLE)
             .select("*")
             .is_("deleted_at", "null")
         )
         query = self._apply_identity_filter(query, identity)
-        response = await query.order("created_at", desc=True).execute()
+
+        if updated_after:
+            # Filter receipts modified after the given timestamp (delta sync)
+            query = query.gt("updated_at", updated_after.strip())
+
+        query = query.order("updated_at", desc=True)
+
+        if limit is not None:
+            start = offset or 0
+            query = query.range(start, start + limit - 1)
+
+        response = await query.execute()
         return response.data if response else []
 
     async def get_by_id(self, receipt_id: str, identity: Identity) -> dict | None:

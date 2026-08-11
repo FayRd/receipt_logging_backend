@@ -3,7 +3,7 @@ import pytest
 
 def test_unauthorized_wrong_device_token(client, mock_device):
     headers = {
-        "X-Device-ID": mock_device["device_id"],
+        "X-Device-Name": mock_device["device_name"],
         "X-Device-Token": "wrong-token-123"
     }
     response = client.get("/api/v1/receipts/", headers=headers)

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from supabase import AsyncClient
 from src.Infrastructure.database import get_supabase_client
-from src.Auth.identity import Identity, get_current_identity
+from src.Auth.identity import Identity, get_current_identity, require_link_identity
 from src.Auth.rate_limiter import rate_limit
 from src.Models.schemas import (
     DeviceRegisterRequest,
@@ -28,16 +28,17 @@ async def register_device(
     body: DeviceRegisterRequest,
     repo: DeviceRepository = Depends(get_repo),
 ):
-    """Register a new device hardware ID and fingerprint token, or refresh an existing one.
+    """Register a new device hardware/variant name and fingerprint token, or refresh an existing one.
 
-    Idempotent — calling with the same device_id updates the token and user association.
+    Idempotent — calling with the same device_name updates the token and user association.
     Rate limited to protect against device registration spam.
+    Public route — no authentication headers required.
     """
     device = await repo.register_or_update(body)
     if not device:
         raise HTTPException(
             status_code=401,
-            detail="Invalid device token for existing device_id.",
+            detail="Invalid device token for existing device_name.",
         )
     return device
 
@@ -52,11 +53,11 @@ async def get_my_device(
     identity: Identity = Depends(get_current_identity),
     repo: DeviceRepository = Depends(get_repo),
 ):
-    """Retrieve the device record for the calling device's X-Device-ID.
+    """Retrieve the device record for the calling device's X-Device-Name.
 
-    Requires valid X-Device-ID and X-Device-Token headers.
+    Requires valid X-Device-Name and X-Device-Token headers. Omits X-User-Name.
     """
-    device = await repo.get_by_device_id(identity.device_id)
+    device = await repo.get_by_device_id(identity.device_name)
     if not device:
         raise HTTPException(status_code=404, detail="Device not found.")
     return device
@@ -70,21 +71,22 @@ async def get_my_device(
 )
 async def link_device_user(
     body: DeviceLinkRequest,
-    identity: Identity = Depends(get_current_identity),
+    identity: Identity = Depends(require_link_identity),
     repo: DeviceRepository = Depends(get_repo),
 ):
-    """Link a device to a user account, or pass user_id=null to unlink (guest mode).
+    """Link a device to a user account by username, or pass username=null to unlink (guest mode).
 
-    Requires valid X-Device-ID and X-Device-Token headers.
-    Enforces that body.device_id matches identity.device_id to prevent cross-device hijacking.
+    Requires ALL THREE authentication headers: X-Device-Name, X-Device-Token, X-User-Name.
+    Enforces that body.device_name matches identity.device_name to prevent cross-device hijacking.
     """
-    if body.device_id.strip() != identity.device_id:
+    target_device = await repo.get_by_device_id(body.device_name)
+    if not target_device or target_device["name"] != identity.device_name:
         raise HTTPException(
             status_code=403,
-            detail="Cannot modify link status for another device_id.",
+            detail="Cannot modify link status for another device_name.",
         )
 
-    device = await repo.link_user(body.device_id, body.device_token, body.user_id)
+    device = await repo.link_user(body.device_name, body.device_token, body.username)
     if not device:
         raise HTTPException(
             status_code=401,
@@ -105,12 +107,12 @@ async def delete_my_device(
 ):
     """Soft-delete calling device registration record.
 
-    Requires valid X-Device-ID and X-Device-Token headers.
+    Requires valid X-Device-Name and X-Device-Token headers. Omits X-User-Name.
     """
-    deleted = await repo.soft_delete(identity.device_id)
+    deleted = await repo.soft_delete(identity.device_name)
     if not deleted:
         raise HTTPException(
             status_code=404,
             detail="Device record not found or already deleted.",
         )
-    return {"success": True, "device_id": identity.device_id}
+    return {"success": True, "device_name": identity.device_name}

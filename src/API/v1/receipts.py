@@ -24,11 +24,25 @@ async def get_repo(db: AsyncClient = Depends(get_supabase_client)) -> ReceiptRep
     dependencies=[Depends(rate_limit(lambda s: s.rate_limit_crud_per_minute))],
 )
 async def list_receipts(
+    updated_after: str | None = None,
+    limit: int | None = None,
+    offset: int | None = None,
     identity: Identity = Depends(get_current_identity),
     repo: ReceiptRepository = Depends(get_repo),
 ):
-    """Get all non-deleted receipts owned by the caller's session identity, newest first."""
-    return await repo.get_all_by_identity(identity)
+    """Get all non-deleted receipts owned by the caller's session identity.
+
+    Supports optional delta syncing via `updated_after` (ISO 8601 timestamp) to fetch
+    only receipts modified after a given point in time. Supports pagination via
+    `limit` (number of records) and `offset` (starting position).
+    Results are ordered by updated_at DESC.
+    """
+    return await repo.get_all_by_identity(
+        identity,
+        updated_after=updated_after,
+        limit=limit,
+        offset=offset,
+    )
 
 
 # ── GET single receipt ────────────────────────────────────────────────────────

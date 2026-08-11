@@ -64,12 +64,12 @@ def test_chat_history_unowned(client, mock_device):
     device_b_id = "DEV-B-100"
     device_b_token = "token-B-123456"
     client.post("/api/v1/devices/register", json={
-        "device_id": device_b_id,
+        "device_name": device_b_id,
         "device_token": device_b_token
     })
     
     headers_b = {
-        "X-Device-ID": device_b_id,
+        "X-Device-Name": device_b_id,
         "X-Device-Token": device_b_token
     }
     
@@ -130,12 +130,12 @@ def test_delete_chat_unowned(client, mock_device):
     device_b_id = f"DEV-B-{uuid.uuid4().hex[:6]}"
     device_b_token = f"token-B-{uuid.uuid4().hex}"
     client.post("/api/v1/devices/register", json={
-        "device_id": device_b_id,
+        "device_name": device_b_id,
         "device_token": device_b_token
     })
     
     headers_b = {
-        "X-Device-ID": device_b_id,
+        "X-Device-Name": device_b_id,
         "X-Device-Token": device_b_token
     }
     

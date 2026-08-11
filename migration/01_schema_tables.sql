@@ -11,16 +11,18 @@ CREATE TABLE IF NOT EXISTS users (
     mobile_number TEXT,
     avatar_image_path TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     deleted_at TIMESTAMPTZ
 );
 
 -- 2. Devices Table
 CREATE TABLE IF NOT EXISTS devices (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    device_id TEXT UNIQUE NOT NULL,
-    device_token TEXT NOT NULL,
+    name TEXT UNIQUE NOT NULL,
+    device_token_hash TEXT NOT NULL,
     user_id UUID REFERENCES users(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     deleted_at TIMESTAMPTZ
 );
 
@@ -31,6 +33,7 @@ CREATE TABLE IF NOT EXISTS receipts (
     device_id TEXT NOT NULL,
     receipt JSONB NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     deleted_at TIMESTAMPTZ
 );
 

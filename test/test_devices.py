@@ -84,7 +84,7 @@ def test_device_link_success(client, mock_device):
         "X-Device-Name": mock_device["device_name"],
         "X-Device-Token": mock_device["device_token"],
         "X-User-Name": username,
-        "X-User-Token": password_hash,
+        "X-User-Token": password,
     }
     
     response = client.post("/api/v1/devices/link", json={
@@ -96,7 +96,7 @@ def test_device_link_success(client, mock_device):
     assert response.json()["username"] == username
 
     # Cleanup user
-    user_headers = {"X-User-Name": username, "X-User-Token": password_hash}
+    user_headers = {"X-User-Name": username, "X-User-Token": password}
     client.delete("/api/v1/user/me", headers=user_headers)
 
 
@@ -106,7 +106,7 @@ def test_device_link_wrong_token(client, mock_device):
         "X-Device-Name": mock_device["device_name"],
         "X-Device-Token": "wrong_token_123",
         "X-User-Name": username,
-        "X-User-Token": "fake_hash_123",
+        "X-User-Token": "wrong_password_123",
     }
 
     response = client.post("/api/v1/devices/link", json={
@@ -133,7 +133,6 @@ def test_device_link_migrates_guest_data(client, mock_device):
     # 2. Create user
     username = f"user_{uuid.uuid4().hex[:6]}"
     password = "secure_password"
-    password_hash = UserRepository.hash_password(password)
 
     create_res = client.post("/api/v1/user/create", json={
         "username": username,
@@ -147,7 +146,7 @@ def test_device_link_migrates_guest_data(client, mock_device):
         "X-Device-Name": mock_device["device_name"],
         "X-Device-Token": mock_device["device_token"],
         "X-User-Name": username,
-        "X-User-Token": password_hash,
+        "X-User-Token": password,
     }
 
     res2 = client.post("/api/v1/devices/link", json={
@@ -157,7 +156,7 @@ def test_device_link_migrates_guest_data(client, mock_device):
     assert res2.status_code == 200
 
     # Cleanup user
-    user_headers = {"X-User-Name": username, "X-User-Token": password_hash}
+    user_headers = {"X-User-Name": username, "X-User-Token": password}
     client.delete("/api/v1/user/me", headers=user_headers)
 
 

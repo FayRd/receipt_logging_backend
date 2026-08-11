@@ -81,7 +81,7 @@ def mock_user_session(client, mock_device):
         "X-Device-Name": mock_device["device_name"],
         "X-Device-Token": mock_device["device_token"],
         "X-User-Name": username,
-        "X-User-Token": password_hash,
+        "X-User-Token": password,
     }
 
     link_res = client.post(
@@ -97,7 +97,7 @@ def mock_user_session(client, mock_device):
     # User-authenticated headers (X-User-Name, X-User-Token)
     headers = {
         "X-User-Name": username,
-        "X-User-Token": password_hash,
+        "X-User-Token": password,
     }
 
     session_info = {

@@ -76,7 +76,7 @@ def test_chat_history_unowned(client, mock_user_session):
 
     headers_b = {
         "X-User-Name": user_b_name,
-        "X-User-Token": UserRepository.hash_password(password)
+        "X-User-Token": password
     }
     
     res = client.get(f"/api/v1/chat/history?conversation_id={conv_id}", headers=headers_b)
@@ -148,7 +148,7 @@ def test_delete_chat_unowned(client, mock_user_session):
 
     headers_b = {
         "X-User-Name": user_b_name,
-        "X-User-Token": UserRepository.hash_password(password)
+        "X-User-Token": password
     }
     
     del_res = client.delete(f"/api/v1/chat/{conv_id}", headers=headers_b)

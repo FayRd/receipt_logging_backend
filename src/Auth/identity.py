@@ -125,8 +125,9 @@ async def get_user_identity(
         )
 
     stored_password_hash = user.get("password", "")
+    incoming_user_hash = UserRepository.hash_password(clean_user_token)
 
-    if not secrets.compare_digest(clean_user_token.encode("utf-8"), stored_password_hash.encode("utf-8")):
+    if not secrets.compare_digest(incoming_user_hash.encode("utf-8"), stored_password_hash.encode("utf-8")):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid user authentication token.",
@@ -195,7 +196,8 @@ async def require_link_bridge_identity(
         )
 
     stored_password_hash = user.get("password", "")
-    if not secrets.compare_digest(clean_user_token.encode("utf-8"), stored_password_hash.encode("utf-8")):
+    incoming_user_hash = UserRepository.hash_password(clean_user_token)
+    if not secrets.compare_digest(incoming_user_hash.encode("utf-8"), stored_password_hash.encode("utf-8")):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid user authentication token.",

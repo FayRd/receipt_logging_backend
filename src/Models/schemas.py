@@ -1,5 +1,6 @@
+import json
 from dataclasses import dataclass
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from datetime import datetime
 
 
@@ -263,15 +264,38 @@ class DeviceRegisterRequest(BaseModel):
     username: str | None = None
 
 
+class GuestDataMigrationPayload(BaseModel):
+    """Payload containing guest records exported from local Isar DB for migration on signup."""
+    receipts: list[dict] = Field(default_factory=list, max_length=200)
+    conversations: list[dict] = Field(default_factory=list, max_length=200)
+    chat_messages: list[dict] = Field(default_factory=list, max_length=500)
+
+
 class DeviceLinkRequest(BaseModel):
     """Request body for linking/unlinking a device to a user account.
 
     device_name is the hardware or session variant name string (e.g. MS701-A1B1).
     username specifies target user account to link, or null to unlink (guest mode).
     Tokens are supplied exclusively via X-Device-Token and X-User-Token HTTP headers.
+    migrate_data is an optional guest data payload exported from local Isar DB (object or stringified JSON).
     """
     device_name: str = Field(..., min_length=3, max_length=100)
     username: str | None = None  # None unlinks the user (guest mode)
+    migrate_data: GuestDataMigrationPayload | dict | str | None = Field(
+        default=None,
+        description="Optional guest data payload: {receipts: [...], conversations: [...], chat_messages: [...]} or JSON string.",
+    )
+
+    @field_validator("migrate_data", mode="before")
+    @classmethod
+    def parse_migrate_data(cls, v):
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except Exception:
+                raise ValueError("Invalid JSON string for migrate_data")
+        return v
+
 
 
 class DeviceRecord(BaseModel):

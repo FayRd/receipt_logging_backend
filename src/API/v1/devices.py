@@ -10,6 +10,7 @@ from src.Models.schemas import (
     DeviceRecord,
 )
 from src.Models.Devices.device_repository import DeviceRepository
+from src.Services.data_migration_service import DataMigrationService
 
 router = APIRouter(prefix="/devices", tags=["Devices"])
 
@@ -72,11 +73,15 @@ async def link_device_user(
     body: DeviceLinkRequest,
     identity: Identity = Depends(require_link_bridge_identity),
     repo: DeviceRepository = Depends(get_repo),
+    db: AsyncClient = Depends(get_supabase_client),
 ):
     """Link a device to a user account by username, or pass username=null to unlink (guest mode).
 
-    Requires ALL FOUR authentication headers: X-Device-Name, X-Device-Token, X-User-Name, X-User-Token.
+    Requires X-Device-Name and X-Device-Token headers. When linking (username provided) also
+    requires X-User-Name and X-User-Token headers.
     Enforces that body.device_name matches identity.device_name to prevent cross-device hijacking.
+    If migrate_data is provided on linking, bulk-migrates guest receipts/conversations/chat_messages
+    into Supabase associated with the newly linked user_id.
     """
     target_device = await repo.get_by_device_id(body.device_name)
     if not target_device or target_device["name"] != identity.device_name:
@@ -91,6 +96,23 @@ async def link_device_user(
             status_code=401,
             detail="Device not registered or invalid user credentials.",
         )
+
+    # Migrate local guest data into Supabase when linking to a user account
+    target_user_id = device.get("user_id") or identity.user_id
+    if body.username and body.migrate_data and target_user_id:
+        payload = (
+            body.migrate_data.model_dump()
+            if hasattr(body.migrate_data, "model_dump")
+            else body.migrate_data
+        )
+        if isinstance(payload, dict):
+            await DataMigrationService.migrate_user_data(
+                db=db,
+                user_id=target_user_id,
+                device_name=body.device_name,
+                migrate_data=payload,
+            )
+
     return device
 
 

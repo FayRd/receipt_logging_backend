@@ -127,10 +127,7 @@ def generate_receipt_payload():
 
 
 def test_device_link_migrates_guest_data(client, mock_device):
-    # 1. Create guest receipt via scan or guest mode
-    # (Guest receipts are saved in local Isar DB in guest mode)
-
-    # 2. Create user
+    # Create user
     username = f"user_{uuid.uuid4().hex[:6]}"
     password = "secure_password"
 
@@ -139,9 +136,49 @@ def test_device_link_migrates_guest_data(client, mock_device):
         "email": f"{username}@test.example.com",
         "password": password,
     })
+    assert create_res.status_code == 201
     user_id = create_res.json()["id"]
 
-    # 3. Link device to user passing all 4 headers
+    # Build migrate_data payload with guest receipt, conversation, and chat_messages
+    migrate_data = {
+        "receipts": [
+            {
+                "id": "res-1770912345678",
+                "receipt": {
+                    "merchant_name": "Guest Target Store",
+                    "line_items": [
+                        {"description": "Organic Milk", "quantity": 1, "unit_price": 4.99, "total_price": 4.99}
+                    ],
+                    "total_amount": 4.99,
+                    "currency": "USD",
+                    "category": "Groceries",
+                    "date": "Aug 12, 2026",
+                    "raw_text": None,
+                    "confidence_score": 0.95
+                },
+                "created_at": "2026-08-12T12:00:00Z"
+            }
+        ],
+        "conversations": [
+            {
+                "id": "local_1770912345678",
+                "title": "Guest Conversation",
+                "created_at": "2026-08-12T12:00:00Z",
+                "updated_at": "2026-08-12T12:00:00Z"
+            }
+        ],
+        "chat_messages": [
+            {
+                "id": "local_msg_1770912345678",
+                "conversation_id": "local_1770912345678",
+                "sender": "user",
+                "content": "How much did I spend?",
+                "created_at": "2026-08-12T12:01:00Z"
+            }
+        ]
+    }
+
+    # Link device to user passing all 4 headers and migrate_data payload
     link_headers = {
         "X-Device-Name": mock_device["device_name"],
         "X-Device-Token": mock_device["device_token"],
@@ -151,7 +188,8 @@ def test_device_link_migrates_guest_data(client, mock_device):
 
     res2 = client.post("/api/v1/devices/link", json={
         "device_name": mock_device["device_name"],
-        "username": username
+        "username": username,
+        "migrate_data": migrate_data
     }, headers=link_headers)
     assert res2.status_code == 200
 

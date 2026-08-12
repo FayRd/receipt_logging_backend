@@ -76,6 +76,7 @@ class ReceiptRecord(BaseModel):
     device_id: str
     receipt: Receipt
     created_at: datetime
+    updated_at: datetime | None = None
     deleted_at: datetime | None = None
 
 
@@ -128,6 +129,7 @@ class UserRecord(BaseModel):
     mobile_number: str | None = None
     avatar_image_path: str | None = None
     created_at: datetime
+    updated_at: datetime | None = None
     deleted_at: datetime | None = None
 
 
@@ -146,6 +148,25 @@ class UserLoginResponse(BaseModel):
     success: bool
     user: UserRecord
     message: str
+
+
+# ── PASSWORD RESET SCHEMAS ───────────────────────────────────────────────────
+
+class PasswordResetInitiateRequest(BaseModel):
+    """Request body for initiating a password reset via email or mobile number."""
+    identifier: str = Field(..., min_length=3, description="Email address or mobile number.")
+
+
+class PasswordResetOtpRequest(BaseModel):
+    """Request body for verifying a 6-digit password reset OTP."""
+    identifier: str = Field(..., min_length=3, description="Email address or mobile number.")
+    otp: str = Field(..., min_length=6, max_length=6, description="6-digit numeric OTP code.")
+
+
+class PasswordResetNewRequest(BaseModel):
+    """Request body for setting a new password using a single-use reset_token."""
+    reset_token: str = Field(..., min_length=10, description="Single-use reset token issued after OTP verification.")
+    new_password: str = Field(..., min_length=6, description="New password.")
 
 
 # ── CHAT / CONVERSATION SCHEMAS ───────────────────────────────────────────────
@@ -203,26 +224,31 @@ class ChatHistoryResponse(BaseModel):
 class DeviceRegisterRequest(BaseModel):
     """Request body for registering or updating a device.
 
-    device_token is the cryptographic hardware fingerprint generated on first app boot.
+    device_name is the hardware or session variant identifier string, e.g. MS701-A1B1.
+    device_token is the plaintext secret device token (hashed server-side).
+    username is optional user account to associate on registration.
     """
-    device_id: str = Field(..., min_length=3, max_length=100)
+    device_name: str = Field(..., min_length=3, max_length=100)
     device_token: str = Field(..., min_length=8, max_length=256)
-    user_id: str | None = None
+    username: str | None = None
 
 
 class DeviceLinkRequest(BaseModel):
     """Request body for linking/unlinking a device to a user account.
 
-    Requires device_token for ownership verification before modifying the link.
+    device_name is the hardware or session variant name string (e.g. MS701-A1B1).
+    username specifies target user account to link, or null to unlink (guest mode).
+    Tokens are supplied exclusively via X-Device-Token and X-User-Token HTTP headers.
     """
-    device_id: str
-    device_token: str
-    user_id: str | None = None  # None unlinks the user (guest mode)
+    device_name: str = Field(..., min_length=3, max_length=100)
+    username: str | None = None  # None unlinks the user (guest mode)
 
 
 class DeviceRecord(BaseModel):
     id: str
-    device_id: str
+    name: str
+    username: str | None = None
     user_id: str | None = None
     created_at: datetime
+    updated_at: datetime | None = None
     deleted_at: datetime | None = None

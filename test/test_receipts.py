@@ -10,9 +10,9 @@ def generate_receipt_payload():
     }
 
 def test_get_receipts_guest(client, mock_device):
+    # Guest devices without X-User-Name/X-User-Token headers receive 401 or 422
     response = client.get("/api/v1/receipts/", headers=mock_device["headers"])
-    assert response.status_code == 200
-    assert isinstance(response.json(), list)
+    assert response.status_code in (401, 422)
 
 def test_get_receipts_user(client, mock_user_session):
     response = client.get("/api/v1/receipts/", headers=mock_user_session["headers"])

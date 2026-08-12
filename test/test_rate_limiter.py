@@ -5,7 +5,7 @@ from src.Auth.rate_limiter import limiter
 
 
 def test_rate_limit_exceeded_auth(client):
-    headers = {"X-Device-ID": "TEST-RATE-LIMIT-DEV-001"}
+    headers = {"X-Device-Name": "TEST-RATE-LIMIT-DEV-001"}
     payload = {"username": "nonexistent_user", "password": "wrong_password"}
 
     # Execute 10 requests (auth limit is 10/min)
@@ -44,8 +44,8 @@ def test_rate_limit_exceeded_scan_endpoint(client, mock_device):
 
 def test_rate_limit_distinct_keys(client):
     # Different device IDs maintain isolated rate limit windows
-    dev1_headers = {"X-Device-ID": "DEV-AAA-111"}
-    dev2_headers = {"X-Device-ID": "DEV-BBB-222"}
+    dev1_headers = {"X-Device-Name": "DEV-AAA-111", "X-Device-Token": "token-aaa-111"}
+    dev2_headers = {"X-Device-Name": "DEV-BBB-222", "X-Device-Token": "token-bbb-222"}
     payload = {"username": "user1", "password": "pass1"}
 
     # Dev 1 consumes all 10 limit slots

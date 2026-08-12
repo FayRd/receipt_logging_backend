@@ -20,9 +20,10 @@ class UserRepository:
     # ── PASSWORD HASHING ──────────────────────────────────────────────────────
     # This is a pure CPU operation — intentionally kept sync (no I/O).
 
-    def hash_password(self, password: str) -> str:
+    @staticmethod
+    def hash_password(password: str) -> str:
         """Apply server-side PBKDF2/SHA-256 salted hash to the incoming password string."""
-        salted = f"{password}:{self._SERVER_SALT}".encode("utf-8")
+        salted = f"{password}:{UserRepository._SERVER_SALT}".encode("utf-8")
         return hashlib.pbkdf2_hmac(
             "sha256",
             salted,
@@ -46,7 +47,20 @@ class UserRepository:
 
     async def get_by_email(self, email: str) -> dict | None:
         """Fetch a raw user row (including password hash) by email (case-insensitive)."""
+        clean_email = email.strip().lower()
         res = await (
+            self.db.table(self.TABLE)
+            .select("*")
+            .eq("email", clean_email)
+            .is_("deleted_at", "null")
+            .maybe_single()
+            .execute()
+        )
+        if res and res.data:
+            return res.data
+
+        # Fallback to ilike if stored with mixed casing
+        res_ilike = await (
             self.db.table(self.TABLE)
             .select("*")
             .ilike("email", email.strip())
@@ -54,7 +68,7 @@ class UserRepository:
             .maybe_single()
             .execute()
         )
-        return res.data if res else None
+        return res_ilike.data if res_ilike else None
 
     async def get_by_identifier(self, identifier: str) -> dict | None:
         """Fetch a raw user row by username or email (case-insensitive).
@@ -66,6 +80,39 @@ class UserRepository:
         if user:
             return user
         return await self.get_by_email(identifier)
+
+    async def get_by_email_or_mobile(self, identifier: str) -> dict | None:
+        """Fetch user row by username, email, or mobile_number (case-insensitive)."""
+        clean = identifier.strip()
+        user = await self.get_by_identifier(clean)
+        if user:
+            return user
+
+        res = await (
+            self.db.table(self.TABLE)
+            .select("*")
+            .eq("mobile_number", clean)
+            .is_("deleted_at", "null")
+            .maybe_single()
+            .execute()
+        )
+        if res and res.data:
+            return res.data
+
+        clean_digits = "".join(c for c in clean if c.isdigit() or c == "+")
+        if clean_digits and clean_digits != clean:
+            res_digits = await (
+                self.db.table(self.TABLE)
+                .select("*")
+                .eq("mobile_number", clean_digits)
+                .is_("deleted_at", "null")
+                .maybe_single()
+                .execute()
+            )
+            if res_digits and res_digits.data:
+                return res_digits.data
+
+        return None
 
     async def get_by_id(self, user_id: str) -> dict | None:
         """Fetch a sanitized user row (no password) by UUID."""

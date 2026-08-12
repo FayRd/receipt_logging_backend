@@ -212,3 +212,19 @@ class DeviceRepository:
             .execute()
         )
         return len(res.data) > 0 if res and res.data else False
+
+    async def rotate_device_token(self, device_name: str, new_token: str) -> dict | None:
+        """Update stored device_token_hash for an authenticated device."""
+        clean_name = device_name.strip()
+        new_hash = hash_device_token(new_token)
+        existing = await self.get_by_device_id(clean_name)
+        if not existing:
+            return None
+
+        res = await (
+            self.db.table(self.TABLE)
+            .update({"device_token_hash": new_hash})
+            .eq("id", existing["id"])
+            .execute()
+        )
+        return res.data[0] if res and res.data else None

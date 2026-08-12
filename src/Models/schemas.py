@@ -282,3 +282,8 @@ class DeviceRecord(BaseModel):
     created_at: datetime
     updated_at: datetime | None = None
     deleted_at: datetime | None = None
+
+
+class DeviceTokenRotateRequest(BaseModel):
+    """Request body for rotating an existing device's secret authentication token."""
+    new_device_token: str = Field(..., min_length=8, max_length=256, description="Fresh secret device authentication token.")

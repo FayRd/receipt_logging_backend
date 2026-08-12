@@ -402,9 +402,23 @@ Soft-delete calling device registration.
   ```json
   {
     "success": true,
-    "device_id": "..."
+    "device_name": "MS700-AAAA"
   }
   ```
+
+---
+
+### `POST /api/v1/devices/rotate-token`
+Rotate the secret `device_token` for an authenticated device.
+
+- **Required Headers**: `X-Device-Name`, `X-Device-Token` (current token)
+- **Request Body**: `DeviceTokenRotateRequest`
+  ```json
+  {
+    "new_device_token": "token_new_uuid_12345678"
+  }
+  ```
+- **Response Schema** (`200 OK`): `DeviceRecord`
 
 ---
 

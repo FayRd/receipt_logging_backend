@@ -149,24 +149,23 @@ require_user_identity = get_user_identity
 async def require_link_bridge_identity(
     x_device_name: str = Header(..., alias="X-Device-Name"),
     x_device_token: str = Header(..., alias="X-Device-Token"),
-    x_user_name: str = Header(..., alias="X-User-Name"),
-    x_user_token: str = Header(..., alias="X-User-Token"),
+    x_user_name: str | None = Header(None, alias="X-User-Name"),
+    x_user_token: str | None = Header(None, alias="X-User-Token"),
     db: AsyncClient = Depends(get_supabase_client),
 ) -> Identity:
-    """FastAPI dependency for POST /devices/link enforcing ALL FOUR headers:
+    """FastAPI dependency for POST /devices/link:
 
-    X-Device-Name, X-Device-Token, X-User-Name, X-User-Token.
-    Verifies both device token and user credentials before allowing link modification.
+    Requires X-Device-Name and X-Device-Token to verify device identity.
+    If X-User-Name and X-User-Token are present, also verifies user credentials (for linking).
+    Allows device-only authorization for unlinking (when user headers are omitted).
     """
-    clean_device_name = x_device_name.strip()
-    clean_device_token = x_device_token.strip()
-    clean_username = x_user_name.strip()
-    clean_user_token = x_user_token.strip()
+    clean_device_name = x_device_name.strip() if x_device_name else ""
+    clean_device_token = x_device_token.strip() if x_device_token else ""
 
-    if not clean_device_name or not clean_device_token or not clean_username or not clean_user_token:
+    if not clean_device_name or not clean_device_token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="All four headers (X-Device-Name, X-Device-Token, X-User-Name, X-User-Token) are required for POST /devices/link.",
+            detail="X-Device-Name and X-Device-Token headers are required for POST /devices/link.",
         )
 
     # 1. Verify Device Identity
@@ -186,27 +185,35 @@ async def require_link_bridge_identity(
             detail="Invalid device authentication token.",
         )
 
-    # 2. Verify User Identity
-    user_repo = UserRepository(db)
-    user = await user_repo.get_by_identifier(clean_username)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User account not found or invalid credentials.",
-        )
+    # 2. Verify User Identity if user credentials headers are provided
+    db_user_id = device.get("user_id")
+    db_username = None
+    if x_user_name and x_user_token:
+        clean_username = x_user_name.strip()
+        clean_user_token = x_user_token.strip()
 
-    stored_password_hash = user.get("password", "")
-    incoming_user_hash = UserRepository.hash_password(clean_user_token)
-    if not secrets.compare_digest(incoming_user_hash.encode("utf-8"), stored_password_hash.encode("utf-8")):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid user authentication token.",
-        )
+        user_repo = UserRepository(db)
+        user = await user_repo.get_by_identifier(clean_username)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User account not found or invalid credentials.",
+            )
+
+        stored_password_hash = user.get("password", "")
+        incoming_user_hash = UserRepository.hash_password(clean_user_token)
+        if not secrets.compare_digest(incoming_user_hash.encode("utf-8"), stored_password_hash.encode("utf-8")):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid user authentication token.",
+            )
+        db_user_id = user["id"]
+        db_username = user["username"]
 
     canonical_name = device.get("name", clean_device_name)
     return Identity(
-        user_id=user["id"],
-        username=user["username"],
+        user_id=db_user_id,
+        username=db_username,
         device_id=device["id"],
         device_name=canonical_name,
     )

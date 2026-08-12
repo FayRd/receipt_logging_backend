@@ -6,6 +6,7 @@ from src.Auth.rate_limiter import rate_limit
 from src.Models.schemas import (
     DeviceRegisterRequest,
     DeviceLinkRequest,
+    DeviceTokenRotateRequest,
     DeviceRecord,
 )
 from src.Models.Devices.device_repository import DeviceRepository
@@ -114,3 +115,26 @@ async def delete_my_device(
             detail="Device record not found or already deleted.",
         )
     return {"success": True, "device_name": identity.device_name}
+
+
+# ── POST /devices/rotate-token ────────────────────────────────────────────────
+@router.post(
+    "/rotate-token",
+    response_model=DeviceRecord,
+    status_code=200,
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_auth_per_minute))],
+)
+async def rotate_device_token_endpoint(
+    body: DeviceTokenRotateRequest,
+    identity: Identity = Depends(get_device_identity),
+    repo: DeviceRepository = Depends(get_repo),
+):
+    """Rotate secret device_token for the calling hardware device.
+
+    Requires valid X-Device-Name and X-Device-Token (current token) headers.
+    Updates stored device_token_hash to new_device_token and returns updated record.
+    """
+    device = await repo.rotate_device_token(identity.device_name, body.new_device_token)
+    if not device:
+        raise HTTPException(status_code=404, detail="Device record not found.")
+    return device

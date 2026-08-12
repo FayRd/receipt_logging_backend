@@ -1,14 +1,19 @@
+import uuid
+from datetime import datetime, timezone
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from supabase import AsyncClient
 from src.Infrastructure.database import get_supabase_client
-from src.Auth.identity import Identity, get_user_identity
+from src.Auth.identity import Identity, get_user_identity, get_scoped_identity
 from src.Auth.rate_limiter import rate_limit
 from src.Models.schemas import (
+    ChatMessageInput,
+    ChatMessageRecord,
     ConversationCreateRequest,
     ConversationRecord,
     ChatQueryRequest,
     ChatQueryResponse,
     ChatHistoryResponse,
+    ReceiptContextItem,
 )
 from src.Models.Conversations.conversation_repository import ConversationRepository
 from src.Services.chat_service import ChatService
@@ -108,7 +113,6 @@ async def get_chat_history(
     )
 
 
-# ── 4. POST /chat/query ───────────────────────────────────────────────────────
 @router.post(
     "/query",
     response_model=ChatQueryResponse,
@@ -116,34 +120,77 @@ async def get_chat_history(
 )
 async def send_chat_query(
     body: ChatQueryRequest,
-    identity: Identity = Depends(get_user_identity),
+    identity: Identity = Depends(get_scoped_identity),
     repo: ConversationRepository = Depends(get_repo),
     service: ChatService = Depends(get_service),
 ):
-    """Send a message to Gemini 3.6 Flash and persist both user and assistant messages.
+    """Send a message to Gemini 3.6 Flash with multi-store support.
 
-    Verifies conversation ownership against authenticated user identity.
-    Fetches caller's receipt history for RAG context.
-    Returns HTTP 404 if conversation is not found or not owned by caller. Rate limited.
+    Cloud Store Mode (conversation_id provided):
+        - Verifies conversation ownership (user must be authenticated with X-User-Name/X-User-Token).
+        - Fetches conversation history from Supabase DB for rolling context window.
+        - Persists both user and assistant messages to Supabase DB.
+
+    Local Store Mode (conversation_id null/omitted):
+        - Accepts client-managed conversation_history and recent_receipts for AI RAG context.
+        - No Supabase DB reads or writes (zero cloud storage).
+        - Returns synthetic UUIDs for both messages so clients can save locally to Isar DB.
+        - Supports both Guest (device identity) and User local mode.
     """
-    conv = await repo.get_conversation(body.conversation_id, identity)
-    if not conv:
-        raise HTTPException(status_code=404, detail="Conversation not found")
+    # ── Cloud Store Mode ────────────────────────────────────────────────────────
+    if body.conversation_id:
+        # Cloud store requires user authentication (not guest)
+        if not identity.is_authenticated:
+            raise HTTPException(
+                status_code=401,
+                detail="Cloud store mode requires user authentication (X-Request-Type: user).",
+            )
+        conv = await repo.get_conversation(body.conversation_id, identity)
+        if not conv:
+            raise HTTPException(status_code=404, detail="Conversation not found")
 
-    # Fetch recent message history for rolling context window
-    history_messages, _ = await repo.get_messages(body.conversation_id, limit=20, offset=0)
+        # Fetch recent message history for rolling context window
+        history_messages, _ = await repo.get_messages(body.conversation_id, limit=20, offset=0)
 
-    # Generate Gemini 3.6 Flash response with identity-scoped receipt context
-    ai_response_text = await service.generate_response(
-        identity, body.message, history_messages
+        # Generate Gemini response with identity-scoped receipt context
+        ai_response_text = await service.generate_response(identity, body.message, history_messages)
+
+        # Persist both messages to Supabase DB
+        user_msg = await repo.add_message(body.conversation_id, "user", body.message)
+        ai_msg = await repo.add_message(body.conversation_id, "assistant", ai_response_text)
+
+        return ChatQueryResponse(
+            conversation_id=body.conversation_id,
+            user_message=user_msg,
+            assistant_message=ai_msg,
+        )
+
+    # ── Local Store Mode (Guest or User Local) ──────────────────────────────────
+    ai_response_text = await service.generate_response_local(
+        identity=identity,
+        user_message=body.message,
+        conversation_history=body.conversation_history,
+        recent_receipts=body.recent_receipts,
     )
 
-    # Persist both messages
-    user_msg = await repo.add_message(body.conversation_id, "user", body.message)
-    ai_msg = await repo.add_message(body.conversation_id, "assistant", ai_response_text)
+    now_iso = datetime.now(timezone.utc)
+    user_msg = ChatMessageRecord(
+        id=str(uuid.uuid4()),
+        conversation_id=None,
+        sender="user",
+        content=body.message,
+        created_at=now_iso,
+    )
+    ai_msg = ChatMessageRecord(
+        id=str(uuid.uuid4()),
+        conversation_id=None,
+        sender="assistant",
+        content=ai_response_text,
+        created_at=now_iso,
+    )
 
     return ChatQueryResponse(
-        conversation_id=body.conversation_id,
+        conversation_id=None,
         user_message=user_msg,
         assistant_message=ai_msg,
     )

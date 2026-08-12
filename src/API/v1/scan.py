@@ -6,7 +6,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Up
 from fastapi.responses import StreamingResponse
 
 import redis.asyncio as aioredis
-from src.Auth.identity import Identity, get_current_identity, get_sse_identity
+from src.Auth.identity import Identity, get_scoped_identity, get_sse_identity
 from src.Auth.rate_limiter import rate_limit
 from src.Models.schemas import BulkBatchStatusResponse, BulkJobCreateResponse, Receipt, ScanContext, ScanResponse
 from src.Services.extraction_service import ExtractionService
@@ -95,7 +95,7 @@ async def process_receipt_worker(job_id: str, image_bytes: bytes, content_type: 
 )
 async def parse_receipt(
     image: UploadFile = File(..., description="Receipt or financial statement image file (JPEG, PNG, WEBP, etc.)"),
-    identity: Identity = Depends(get_current_identity),
+    identity: Identity = Depends(get_scoped_identity),
     service: ExtractionService = Depends(get_extraction_service),
 ) -> ScanResponse:
     """Accept a multipart receipt/financial statement image upload and return AI-extracted structured data.
@@ -188,7 +188,7 @@ async def parse_many_receipts(
         ...,
         description="Array of 2 to 10 receipt image files (JPEG, PNG, WEBP, etc.)",
     ),
-    identity: Identity = Depends(get_current_identity),
+    identity: Identity = Depends(get_scoped_identity),
 ) -> BulkJobCreateResponse:
     """Accept multipart/form-data receipt files, dispatch background processing jobs, and immediately
     return batch_id and job_id mappings.

@@ -88,15 +88,15 @@ def test_chat_history_unowned(client, mock_user_session):
 @patch("src.Services.chat_service.ChatService.generate_response", new_callable=AsyncMock)
 def test_chat_query_success(mock_gen, client, mock_user_session):
     mock_gen.return_value = "Mocked AI response."
-    
+
     create_res = client.post("/api/v1/chat/create", headers=mock_user_session["headers"])
     conv_id = create_res.json()["id"]
-    
+
     res = client.post("/api/v1/chat/query", json={
         "conversation_id": conv_id,
         "message": "Hello"
-    }, headers=mock_user_session["headers"])
-    
+    }, headers=mock_user_session["user_scan_headers"])
+
     assert res.status_code == 200
     data = res.json()
     assert data["conversation_id"] == conv_id
@@ -109,17 +109,60 @@ def test_chat_query_unowned(client, mock_user_session):
     res = client.post("/api/v1/chat/query", json={
         "conversation_id": str(uuid.uuid4()),
         "message": "Hello"
-    }, headers=mock_user_session["headers"])
+    }, headers=mock_user_session["user_scan_headers"])
     assert res.status_code == 404
+
+
+@patch("src.Services.chat_service.ChatService.generate_response_local", new_callable=AsyncMock)
+def test_chat_query_local_mode_user(mock_gen, client, mock_user_session):
+    """User local mode: conversation_id null, uses client-supplied conversation_history."""
+    mock_gen.return_value = "Local AI response."
+
+    res = client.post("/api/v1/chat/query", json={
+        "message": "How much did I spend last month?",
+        "conversation_history": [
+            {"role": "user", "content": "Hi there"},
+            {"role": "assistant", "content": "Hello! How can I help you?"},
+        ],
+        "recent_receipts": [
+            {"merchant_name": "Starbucks", "total_amount": 7.50, "category": "Food & Drink", "date": "2026-07-01"},
+        ]
+    }, headers=mock_user_session["user_scan_headers"])
+
+    assert res.status_code == 200
+    data = res.json()
+    assert data["conversation_id"] is None  # Local mode — no Supabase DB write
+    assert data["user_message"]["id"] is not None  # Synthetic UUID returned
+    assert data["assistant_message"]["content"] == "Local AI response."
+    assert mock_gen.called
+
+
+@patch("src.Services.chat_service.ChatService.generate_response_local", new_callable=AsyncMock)
+def test_chat_query_guest_mode(mock_gen, client, mock_device):
+    """Guest mode: uses device headers with X-Request-Type: guest and no conversation_id."""
+    mock_gen.return_value = "Guest AI response."
+
+    res = client.post("/api/v1/chat/query", json={
+        "message": "What receipts have I logged?",
+        "conversation_history": [],
+        "recent_receipts": []
+    }, headers=mock_device["guest_scan_headers"])
+
+    assert res.status_code == 200
+    data = res.json()
+    assert data["conversation_id"] is None  # Guest local mode — zero cloud storage
+    assert data["user_message"]["id"] is not None
+    assert data["assistant_message"]["content"] == "Guest AI response."
+    assert mock_gen.called
 
 
 def test_chat_query_missing_message(client, mock_user_session):
     create_res = client.post("/api/v1/chat/create", headers=mock_user_session["headers"])
     conv_id = create_res.json()["id"]
-    
+
     res = client.post("/api/v1/chat/query", json={
         "conversation_id": conv_id
-    }, headers=mock_user_session["headers"])
+    }, headers=mock_user_session["user_scan_headers"])
     assert res.status_code == 422
 
 

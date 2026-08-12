@@ -189,9 +189,23 @@ class ConversationRecord(BaseModel):
     deleted_at: datetime | None = None
 
 
+class ChatMessageInput(BaseModel):
+    """A single client-supplied conversation history turn for local/guest AI chat."""
+    role: str = Field(..., description="Role of the message sender: 'user' or 'assistant'.")
+    content: str = Field(..., min_length=1, max_length=4000, description="Text content of the message.")
+
+
+class ReceiptContextItem(BaseModel):
+    """A lightweight receipt summary for client-supplied AI RAG context in local/guest chat."""
+    merchant_name: str
+    total_amount: float
+    category: str | None = None
+    date: str | None = None
+
+
 class ChatMessageRecord(BaseModel):
     id: str
-    conversation_id: str
+    conversation_id: str | None  # None for local/guest mode messages not persisted to Supabase
     sender: str  # "user" | "assistant"
     content: str
     created_at: datetime
@@ -201,13 +215,29 @@ class ChatQueryRequest(BaseModel):
     """Request body for sending a message to the AI.
 
     Identity (user_id + device_id) is resolved server-side from session headers.
+
+    Storage mode is controlled by conversation_id:
+    - Cloud Store (User): Supply a valid `conversation_id` UUID — messages are persisted to Supabase DB.
+    - Local Store (User or Guest): Omit or pass null for `conversation_id` — no Supabase DB writes.
+      Client must supply `conversation_history` (prior message turns) and optionally `recent_receipts`
+      (local Isar DB receipts) for AI context.
     """
-    conversation_id: str
-    message: str = Field(..., min_length=1, max_length=2000)
+    conversation_id: str | None = Field(default=None, description="Supabase conversation UUID. Omit/null for local-only storage (Guest or User local mode).")
+    message: str = Field(..., min_length=1, max_length=4000)
+    conversation_history: list[ChatMessageInput] = Field(
+        default_factory=list,
+        max_length=20,
+        description="Client-managed local conversation history (max 20 turns). Used only in local/guest mode.",
+    )
+    recent_receipts: list[ReceiptContextItem] = Field(
+        default_factory=list,
+        max_length=50,
+        description="Client-supplied local receipts for AI spending analysis RAG context. Used only in local/guest mode.",
+    )
 
 
 class ChatQueryResponse(BaseModel):
-    conversation_id: str
+    conversation_id: str | None  # None for local/guest mode
     user_message: ChatMessageRecord
     assistant_message: ChatMessageRecord
 

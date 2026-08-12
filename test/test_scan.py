@@ -30,7 +30,7 @@ def test_scan_parse_valid_receipt(client, mock_device):
 
         response = client.post(
             "/api/v1/scan/parse",
-            headers=mock_device["headers"],
+            headers=mock_device["guest_scan_headers"],
             files=files,
         )
 
@@ -63,7 +63,7 @@ def test_scan_parse_invalid_document_type(client, mock_device):
 
         response = client.post(
             "/api/v1/scan/parse",
-            headers=mock_device["headers"],
+            headers=mock_device["guest_scan_headers"],
             files=files,
         )
 
@@ -83,6 +83,68 @@ def test_scan_parse_unauthenticated(client, invalid_headers):
     assert response.status_code == 401
 
 
+def test_scan_parse_missing_request_type(client, mock_device):
+    """Missing X-Request-Type header returns HTTP 422 (validation error)."""
+    file_bytes = b"fake_image_bytes"
+    files = {"image": ("receipt.jpg", io.BytesIO(file_bytes), "image/jpeg")}
+
+    # Omit X-Request-Type from headers
+    headers_without_type = {
+        "X-Device-Name": mock_device["device_name"],
+        "X-Device-Token": mock_device["device_token"],
+    }
+    response = client.post("/api/v1/scan/parse", headers=headers_without_type, files=files)
+    assert response.status_code == 422
+
+
+def test_scan_parse_invalid_request_type(client, mock_device):
+    """Invalid X-Request-Type value returns HTTP 400."""
+    file_bytes = b"fake_image_bytes"
+    files = {"image": ("receipt.jpg", io.BytesIO(file_bytes), "image/jpeg")}
+
+    headers = {
+        "X-Request-Type": "admin",  # invalid value
+        "X-Device-Name": mock_device["device_name"],
+        "X-Device-Token": mock_device["device_token"],
+    }
+    response = client.post("/api/v1/scan/parse", headers=headers, files=files)
+    assert response.status_code == 400
+
+
+def test_scan_parse_guest_with_user_headers_rejected(client, mock_device, mock_user_session):
+    """Guest request type with user headers mixed in returns HTTP 400."""
+    file_bytes = b"fake_image_bytes"
+    files = {"image": ("receipt.jpg", io.BytesIO(file_bytes), "image/jpeg")}
+
+    # Conflicting headers — guest type with user headers
+    headers = {
+        "X-Request-Type": "guest",
+        "X-Device-Name": mock_device["device_name"],
+        "X-Device-Token": mock_device["device_token"],
+        "X-User-Name": mock_user_session["username"],
+        "X-User-Token": "secret_password_123",
+    }
+    response = client.post("/api/v1/scan/parse", headers=headers, files=files)
+    assert response.status_code == 400
+
+
+def test_scan_parse_user_with_device_headers_rejected(client, mock_device, mock_user_session):
+    """User request type with device headers mixed in returns HTTP 400."""
+    file_bytes = b"fake_image_bytes"
+    files = {"image": ("receipt.jpg", io.BytesIO(file_bytes), "image/jpeg")}
+
+    # Conflicting headers — user type with device headers
+    headers = {
+        "X-Request-Type": "user",
+        "X-Device-Name": mock_device["device_name"],
+        "X-Device-Token": mock_device["device_token"],
+        "X-User-Name": mock_user_session["username"],
+        "X-User-Token": "secret_password_123",
+    }
+    response = client.post("/api/v1/scan/parse", headers=headers, files=files)
+    assert response.status_code == 400
+
+
 def test_scan_parse_file_size_exceeded(client, mock_device):
     # 11MB file payload (> 10MB limit)
     large_bytes = b"0" * (11 * 1024 * 1024)
@@ -90,7 +152,7 @@ def test_scan_parse_file_size_exceeded(client, mock_device):
 
     response = client.post(
         "/api/v1/scan/parse",
-        headers=mock_device["headers"],
+        headers=mock_device["guest_scan_headers"],
         files=files,
     )
 
@@ -107,7 +169,7 @@ def test_scan_parse_many_too_few_files(client, mock_device):
 
     response = client.post(
         "/api/v1/scan/parse-many",
-        headers=mock_device["headers"],
+        headers=mock_device["guest_scan_headers"],
         files=files,
     )
 
@@ -125,7 +187,7 @@ def test_scan_parse_many_too_many_files(client, mock_device):
 
     response = client.post(
         "/api/v1/scan/parse-many",
-        headers=mock_device["headers"],
+        headers=mock_device["guest_scan_headers"],
         files=files,
     )
 
@@ -144,7 +206,7 @@ def test_scan_parse_many_file_size_exceeded(client, mock_device):
 
     response = client.post(
         "/api/v1/scan/parse-many",
-        headers=mock_device["headers"],
+        headers=mock_device["guest_scan_headers"],
         files=files,
     )
 
@@ -185,4 +247,3 @@ if __name__ == "__main__":
     import pytest
     import sys
     sys.exit(pytest.main([__file__]))
-

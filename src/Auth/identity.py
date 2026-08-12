@@ -216,6 +216,119 @@ async def require_link_bridge_identity(
 require_link_identity = require_link_bridge_identity
 
 
+# ── 5. SCOPED IDENTITY — X-Request-Type (POST /scan/*, POST /chat/query) ───────
+async def get_scoped_identity(
+    x_request_type: str = Header(
+        ...,
+        alias="X-Request-Type",
+        description="Request mode: 'user' or 'guest'. Determines which credential headers are required.",
+    ),
+    x_device_name: str | None = Header(None, alias="X-Device-Name"),
+    x_device_token: str | None = Header(None, alias="X-Device-Token"),
+    x_user_name: str | None = Header(None, alias="X-User-Name"),
+    x_user_token: str | None = Header(None, alias="X-User-Token"),
+    db: AsyncClient = Depends(get_supabase_client),
+) -> Identity:
+    """FastAPI dependency for /scan/* and /chat/query endpoints supporting both Guest and User modes.
+
+    X-Request-Type: 'guest'
+        - Requires: X-Device-Name, X-Device-Token
+        - Must omit: X-User-Name, X-User-Token
+
+    X-Request-Type: 'user'
+        - Requires: X-User-Name, X-User-Token
+        - Must omit: X-Device-Name, X-Device-Token
+    """
+    req_type = x_request_type.strip().lower()
+
+    if req_type == "guest":
+        # User credential headers must be absent to prevent header confusion
+        if x_user_name or x_user_token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="For X-Request-Type 'guest', user headers (X-User-Name, X-User-Token) must be omitted.",
+            )
+        if not x_device_name or not x_device_token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="For X-Request-Type 'guest', X-Device-Name and X-Device-Token headers are required.",
+            )
+        # Delegate to device identity verification (reuses existing logic)
+        clean_device_name = x_device_name.strip()
+        clean_device_token = x_device_token.strip()
+        device_repo = DeviceRepository(db)
+        device = await device_repo.get_by_device_id(clean_device_name)
+        if not device:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Unregistered device. Please call POST /api/v1/devices/register first.",
+            )
+        incoming_hash = hash_device_token(clean_device_token)
+        stored_hash = device.get("device_token_hash", "")
+        if not secrets.compare_digest(incoming_hash.encode("utf-8"), stored_hash.encode("utf-8")):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid device authentication token.",
+            )
+        db_user_id = device.get("user_id")
+        db_username = None
+        if db_user_id:
+            user_repo = UserRepository(db)
+            user_row = await user_repo.get_by_id(db_user_id)
+            if user_row:
+                db_username = user_row.get("username")
+        canonical_name = device.get("name", clean_device_name)
+        return Identity(
+            user_id=db_user_id,
+            username=db_username,
+            device_id=device["id"],
+            device_name=canonical_name,
+        )
+
+    elif req_type == "user":
+        # Device credential headers must be absent to prevent header confusion
+        if x_device_name or x_device_token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="For X-Request-Type 'user', device headers (X-Device-Name, X-Device-Token) must be omitted.",
+            )
+        if not x_user_name or not x_user_token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="For X-Request-Type 'user', X-User-Name and X-User-Token headers are required.",
+            )
+        # Delegate to user identity verification (reuses existing logic)
+        clean_username = x_user_name.strip()
+        clean_user_token = x_user_token.strip()
+        user_repo = UserRepository(db)
+        user = await user_repo.get_by_identifier(clean_username)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User account not found or invalid credentials.",
+            )
+        stored_password_hash = user.get("password", "")
+        incoming_user_hash = UserRepository.hash_password(clean_user_token)
+        if not secrets.compare_digest(incoming_user_hash.encode("utf-8"), stored_password_hash.encode("utf-8")):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid user authentication token.",
+            )
+        return Identity(
+            user_id=user["id"],
+            username=user["username"],
+            device_id="",
+            device_name="",
+        )
+
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid X-Request-Type header value. Must be 'user' or 'guest'.",
+        )
+
+
+
 # ── 4. SSE STREAMING IDENTITY ──────────────────────────────────────────────────
 async def get_sse_identity(
     request: Request,

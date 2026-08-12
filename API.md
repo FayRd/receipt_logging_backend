@@ -7,10 +7,16 @@ This document lists all endpoints available in **Receipt Logging Backend v1**, i
 ## Base URL & Authentication
 
 - **Base URL**: `/api/v1`
-- **Session Identity Headers**:
-  - `X-Device-ID`: Hardware device identifier (Required for device/user session)
-  - `X-Device-Token`: Cryptographic device token (Required for device verification)
-  - `X-User-ID`: Authenticated User ID (Optional for guest mode, required for user-protected routes)
+
+### Header Requirements Summary
+
+| Endpoint Category | Mandatory Headers | Payload / Mode Notes |
+| :--- | :--- | :--- |
+| **Public** (`/health/`, `POST /user/create`, `POST /user/login`, `POST /user/reset-password-*`, `POST /devices/register`) | *None* | No authentication required. |
+| **Device / Guest** (`GET /devices/me`, `DELETE /devices/me`) | `X-Device-Name`, `X-Device-Token` | Hardware device variant name & token. |
+| **User Scoped** (`GET/DELETE /user/me`, `/receipts/*`) | `X-User-Name`, `X-User-Token` | User credentials (`X-User-Token` is plaintext password, hashed server-side). |
+| **Link Bridge** (`POST /devices/link`) | `X-Device-Name`, `X-Device-Token`, `X-User-Name`, `X-User-Token` | Requires **all 4 headers**. Device token removed from JSON body. |
+| **Scoped** (`/scan/*`, `POST /chat/query`) | `X-Request-Type` + Mode Headers | **`X-Request-Type: "guest"`**: Requires `X-Device-Name` + `X-Device-Token` (user headers must be omitted).<br>**`X-Request-Type: "user"`**: Requires `X-User-Name` + `X-User-Token` (device headers must be omitted). |
 
 ---
 
@@ -28,9 +34,10 @@ This document lists all endpoints available in **Receipt Logging Backend v1**, i
 ## 1. Scanning (`tags=["Scanning"]`)
 
 ### `POST /api/v1/scan/parse`
-Extract structured receipt details from a single image using Gemini 3.5 Flash.
+Extract structured receipt details from a single image synchronously using Gemini 3.6 Flash.
 
 - **Content-Type**: `multipart/form-data`
+- **Required Headers**: `X-Request-Type` (`"user"` or `"guest"`), plus mode credential headers.
 - **Request Body**:
   - `image`: File (JPEG, PNG, WEBP, etc.)
 - **Response Schema** (`200 OK`): `ScanResponse`
@@ -38,21 +45,21 @@ Extract structured receipt details from a single image using Gemini 3.5 Flash.
   {
     "success": true,
     "data": {
-      "merchant_name": "Starbucks",
+      "merchant_name": "Target Superstore",
       "line_items": [
         {
-          "description": "Iced Latte",
+          "description": "Organic Milk",
           "quantity": 1.0,
-          "unit_price": 5.50,
-          "total_price": 5.50
+          "unit_price": 4.50,
+          "total_price": 4.50
         }
       ],
-      "subtotal": 5.50,
-      "tax_amount": 0.45,
-      "total_amount": 5.95,
+      "subtotal": 4.50,
+      "tax_amount": 0.36,
+      "total_amount": 4.86,
       "currency": "USD",
-      "category": "Food & Beverage",
-      "date": "2026-08-05",
+      "category": "Groceries",
+      "date": "2026-08-12",
       "raw_text": "...",
       "confidence_score": 0.95,
       "notes": null
@@ -60,17 +67,20 @@ Extract structured receipt details from a single image using Gemini 3.5 Flash.
     "error": null
   }
   ```
+- **Error Responses**:
+  - `400 Bad Request` — Missing/invalid `X-Request-Type` or conflicting headers present.
+  - `401 Unauthorized` — Invalid device or user authentication token.
 
 ---
 
-### `POST /api/v1/receipts/bulk`
-Submit multiple receipt files for asynchronous background parsing.
+### `POST /api/v1/scan/parse-many`
+Submit multiple receipt files for asynchronous background parsing (2 to 10 images).
 
 - **Content-Type**: `multipart/form-data`
-- **Required Headers**: `X-Device-ID`, `X-Device-Token`
+- **Required Headers**: `X-Request-Type` (`"user"` or `"guest"`), plus mode credential headers.
 - **Request Body**:
   - `files`: Array of Files (`UploadFile`) — **min: 2, max: 10 images**
-- **Response Schema** (`202 Accepted`):
+- **Response Schema** (`202 Accepted`): `BulkJobCreateResponse`
   ```json
   {
     "batch_id": "b34a12cd-...",
@@ -88,16 +98,16 @@ Submit multiple receipt files for asynchronous background parsing.
   }
   ```
 - **Error Responses**:
-  - `400 Bad Request` — Fewer than 2 or more than 10 files, or a file exceeds the size limit.
-  - `401 Unauthorized` — Missing or invalid `X-Device-ID` / `X-Device-Token` headers.
+  - `400 Bad Request` — Fewer than 2 or more than 10 files, or a file exceeds size limit.
+  - `401 Unauthorized` — Invalid credentials.
 
 ---
 
-### `GET /api/v1/receipts/bulk/{batch_id}`
-Retrieve processing status and extracted results for a bulk receipt upload batch.
+### `GET /api/v1/scan/parse-many/{batch_id}`
+Retrieve status and extracted results for a bulk receipt parsing batch.
 
 - **Path Parameter**: `batch_id` (string, UUID)
-- **Response Schema** (`200 OK`):
+- **Response Schema** (`200 OK`): `BulkBatchStatusResponse`
   ```json
   {
     "batch_id": "b34a12cd-...",
@@ -110,21 +120,14 @@ Retrieve processing status and extracted results for a bulk receipt upload batch
         "filename": "receipt1.jpg",
         "status": "COMPLETED",
         "data": {
-          "merchant_name": "Starbucks",
-          "line_items": [
-            {
-              "description": "Iced Latte",
-              "quantity": 1.0,
-              "unit_price": 5.50,
-              "total_price": 5.50
-            }
-          ],
-          "subtotal": 5.50,
-          "tax_amount": 0.45,
-          "total_amount": 5.95,
+          "merchant_name": "Target Superstore",
+          "line_items": [...],
+          "subtotal": 4.50,
+          "tax_amount": 0.36,
+          "total_amount": 4.86,
           "currency": "USD",
-          "category": "Food & Beverage",
-          "date": "2026-08-05T00:00:00Z",
+          "category": "Groceries",
+          "date": "2026-08-12",
           "raw_text": "...",
           "confidence_score": 0.95,
           "notes": null
@@ -137,27 +140,34 @@ Retrieve processing status and extracted results for a bulk receipt upload batch
 
 ---
 
-### Bulk Receipt Asynchronous Processing Architecture & Workflow
+### `GET /api/v1/scan/parse-many/{batch_id}/stream`
+Open an SSE connection to receive live updates and full extracted batch JSON payload on completion.
 
-Below is the end-to-end sequence diagram and execution lifecycle for bulk receipt processing, from initial batch submission to background worker extraction, Redis state storage, Server-Sent Events (SSE) completion signaling, and final result retrieval.
+- **Path Parameter**: `batch_id` (string, UUID)
+- **Header or Query Auth**: `X-Device-Name` + `X-Device-Token` or query parameters `device_name` + `device_token`.
+- **Emitted Event**: `batch_complete` with full `BulkBatchStatusResponse` JSON payload.
+
+---
+
+### Bulk Receipt Asynchronous Processing Architecture & Workflow
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor Frontend as Frontend Client
-    participant API as FastAPI Backend (POST /receipts/bulk)
+    participant API as FastAPI Backend (POST /scan/parse-many)
     participant Redis as Redis Cache
     participant Worker as Async Background Worker
     participant Gemini as Gemini 3.6 Flash (ExtractionService)
     participant SSE as SSE Event Stream
-    participant GetAPI as FastAPI Backend (GET /receipts/bulk/{batch_id})
+    participant GetAPI as FastAPI Backend (GET /scan/parse-many/{batch_id})
 
     Note over Frontend, API: 1. Batch Upload Submission
-    Frontend->>API: POST /api/v1/receipts/bulk (2-10 image files, Headers: X-Device-ID, X-Device-Token)
+    Frontend->>API: POST /api/v1/scan/parse-many (2-10 files, Headers: X-Request-Type, credentials)
     
     rect rgb(240, 240, 240)
         Note over API: Validation Phase
-        API->>API: Validate Auth Identity (X-Device-ID / Token)
+        API->>API: Validate Auth Identity & Scoped Headers
         API->>API: Enforce 2-10 file count bounds
         API->>API: Enforce per-file size ceiling (max_image_size_bytes)
     end
@@ -187,41 +197,21 @@ sequenceDiagram
     end
 
     Note over Frontend, GetAPI: 5. Final Result Fetching
-    Frontend->>GetAPI: GET /api/v1/receipts/bulk/{batch_id}
+    Frontend->>GetAPI: GET /api/v1/scan/parse-many/{batch_id}
     GetAPI->>Redis: Fetch batch job hashes
     Redis-->>GetAPI: Return job metadata & result JSON strings
     GetAPI->>GetAPI: Parse result JSON strings into Receipt schema dicts
     GetAPI-->>Frontend: 200 OK (batch status + parsed Receipt objects array)
 ```
 
-#### Detailed Lifecycle Steps:
-
-1. **Validation & Immediate Response**:
-   - The caller sends a `POST /api/v1/receipts/bulk` request with 2 to 10 image files and device authentication headers.
-   - The backend validates authentication, file bounds (HTTP 400 if `< 2` or `> 10`), and file size limits.
-   - Initial `PENDING` states are written to Redis under `job:{job_id}` hashes and a `batch:{batch_id}` set.
-   - The endpoint returns `202 Accepted` immediately with the `batch_id` and array of `job_id`s.
-
-2. **Background Processing**:
-   - Asynchronous worker tasks process each image independently using `ExtractionService` to execute Gemini 3.6 Flash vision extraction.
-   - Job status transitions in Redis: `PENDING` $\rightarrow$ `PROCESSING` $\rightarrow$ `COMPLETED` (or `FAILED`).
-   - On completion, the structured `Receipt` Pydantic model is serialized to JSON and saved in `job:{job_id}` under the `result` field.
-
-3. **SSE Completion Event**:
-   - When the final job in a batch completes, an SSE notification (`batch_completed`) is dispatched containing the `batch_id`.
-   - The frontend listens to the SSE stream and receives the instant confirmation signal.
-
-4. **Result Retrieval**:
-   - Upon receiving the `batch_completed` SSE event, the frontend triggers `GET /api/v1/receipts/bulk/{batch_id}`.
-   - The endpoint retrieves all job hashes under `batch:{batch_id}`, parses stored JSON strings into structured `Receipt` objects under each job's `data` field, and returns the formatted response (`200 OK`).
-
 ---
 
 ## 2. Receipts (`tags=["Receipts"]`)
 
 ### `GET /api/v1/receipts/`
-Get all non-deleted receipts for the caller's session identity.
+Get all non-deleted receipts for the authenticated user session.
 
+- **Required Headers**: `X-User-Name`, `X-User-Token`
 - **Response Schema** (`200 OK`): `Array<ReceiptRecord>`
 
 ---
@@ -229,14 +219,16 @@ Get all non-deleted receipts for the caller's session identity.
 ### `GET /api/v1/receipts/{receipt_id}`
 Get a single receipt by ID.
 
-- **Path Parameter**: `receipt_id` (string)
+- **Required Headers**: `X-User-Name`, `X-User-Token`
+- **Path Parameter**: `receipt_id` (string, UUID)
 - **Response Schema** (`200 OK`): `ReceiptRecord`
 
 ---
 
-### `POST /api/v1/receipts/create`
+### `POST /api/v1/receipts/`
 Create a single receipt record.
 
+- **Required Headers**: `X-User-Name`, `X-User-Token`
 - **Request Body**: `ReceiptCreateRequest`
   ```json
   {
@@ -244,7 +236,7 @@ Create a single receipt record.
       "merchant_name": "Target",
       "total_amount": 42.10,
       "currency": "USD",
-      "date": "2026-08-05",
+      "date": "2026-08-12",
       "raw_text": "..."
     }
   }
@@ -253,9 +245,10 @@ Create a single receipt record.
 
 ---
 
-### `POST /api/v1/receipts/create/batch`
-Batch-create up to 100 receipt records.
+### `POST /api/v1/receipts/batch`
+Batch-create up to 100 receipt records in a single database call.
 
+- **Required Headers**: `X-User-Name`, `X-User-Token`
 - **Request Body**: `ReceiptBatchCreateRequest`
   ```json
   {
@@ -264,7 +257,7 @@ Batch-create up to 100 receipt records.
         "merchant_name": "Target",
         "total_amount": 42.10,
         "currency": "USD",
-        "date": "2026-08-05",
+        "date": "2026-08-12",
         "raw_text": "..."
       }
     ]
@@ -275,8 +268,9 @@ Batch-create up to 100 receipt records.
 ---
 
 ### `DELETE /api/v1/receipts/{receipt_id}`
-Soft-delete a receipt record.
+Soft-delete a receipt record by ID.
 
+- **Required Headers**: `X-User-Name`, `X-User-Token`
 - **Response Schema** (`200 OK`):
   ```json
   {
@@ -296,7 +290,10 @@ Register a new user account.
   ```json
   {
     "username": "johndoe",
-    "password": "hashed_password_string",
+    "email": "johndoe@example.com",
+    "password": "my_secret_password",
+    "country_code": "+60",
+    "mobile_number": "123456789",
     "avatar_image_path": null
   }
   ```
@@ -305,34 +302,40 @@ Register a new user account.
 ---
 
 ### `POST /api/v1/user/login`
-Authenticate user credentials.
+Authenticate user credentials using username or email.
 
 - **Request Body**: `UserLoginRequest`
-- **Response Schema** (`200 OK`): `UserLoginResponse`
   ```json
   {
-    "success": true,
-    "user": {
-      "id": "...",
-      "username": "johndoe",
-      "created_at": "2026-08-05T00:00:00Z"
-    },
-    "message": "Login successful."
+    "username": "johndoe",
+    "password": "my_secret_password"
   }
   ```
+- **Response Schema** (`200 OK`): `UserLoginResponse`
 
 ---
 
 ### `GET /api/v1/user/me`
-Get current user profile (requires `X-User-ID`).
+Get current user profile.
 
+- **Required Headers**: `X-User-Name`, `X-User-Token`
+- **Response Schema** (`200 OK`): `UserRecord`
+
+---
+
+### `PATCH /api/v1/user/me`
+Update user profile fields (email, country code, mobile number, avatar).
+
+- **Required Headers**: `X-User-Name`, `X-User-Token`
+- **Request Body**: `UserUpdateRequest`
 - **Response Schema** (`200 OK`): `UserRecord`
 
 ---
 
 ### `DELETE /api/v1/user/me`
-Soft-delete current user account (requires `X-User-ID`).
+Soft-delete current user account.
 
+- **Required Headers**: `X-User-Name`, `X-User-Token`
 - **Response Schema** (`200 OK`):
   ```json
   {
@@ -340,6 +343,14 @@ Soft-delete current user account (requires `X-User-ID`).
     "message": "User profile soft-deleted successfully."
   }
   ```
+
+---
+
+### Password Reset Flow (`/user/reset-password-*`)
+
+1. **`POST /api/v1/user/reset-password-initiate`**: Accepts `identifier` (email or mobile), generates a 6-digit OTP (logged in dev environment).
+2. **`POST /api/v1/user/reset-password-verify-otp`**: Accepts `identifier` + `otp`, returns single-use `reset_token`.
+3. **`POST /api/v1/user/reset-password-new`**: Accepts `reset_token` + `new_password`, updates user password.
 
 ---
 
@@ -351,9 +362,9 @@ Register or update a hardware device.
 - **Request Body**: `DeviceRegisterRequest`
   ```json
   {
-    "device_id": "dev_123456",
-    "device_token": "token_abc123xyz",
-    "user_id": null
+    "device_name": "MS700-AAAA",
+    "device_token": "secret_token_12345678",
+    "username": null
   }
   ```
 - **Response Schema** (`201 Created`): `DeviceRecord`
@@ -363,6 +374,7 @@ Register or update a hardware device.
 ### `GET /api/v1/devices/me`
 Retrieve calling device details.
 
+- **Required Headers**: `X-Device-Name`, `X-Device-Token`
 - **Response Schema** (`200 OK`): `DeviceRecord`
 
 ---
@@ -370,7 +382,14 @@ Retrieve calling device details.
 ### `POST /api/v1/devices/link`
 Link or unlink a device to/from a user account.
 
+- **Required Headers**: **ALL 4 REQUIRED** (`X-Device-Name`, `X-Device-Token`, `X-User-Name`, `X-User-Token`)
 - **Request Body**: `DeviceLinkRequest`
+  ```json
+  {
+    "device_name": "MS700-AAAA",
+    "username": "johndoe"
+  }
+  ```
 - **Response Schema** (`200 OK`): `DeviceRecord`
 
 ---
@@ -378,11 +397,12 @@ Link or unlink a device to/from a user account.
 ### `DELETE /api/v1/devices/me`
 Soft-delete calling device registration.
 
+- **Required Headers**: `X-Device-Name`, `X-Device-Token`
 - **Response Schema** (`200 OK`):
   ```json
   {
     "success": true,
-    "device_id": "dev_123456"
+    "device_id": "..."
   }
   ```
 
@@ -391,51 +411,93 @@ Soft-delete calling device registration.
 ## 5. Chat (`tags=["Chat"]`)
 
 ### `POST /api/v1/chat/create`
-Create a new AI chat conversation.
+Create a new AI chat conversation in Supabase cloud store.
 
-- **Request Body**: `ConversationCreateRequest`
-  ```json
-  {
-    "title": "Monthly Expense Query"
-  }
-  ```
+- **Required Headers**: `X-User-Name`, `X-User-Token`
+- **Request Body**: `ConversationCreateRequest` (`{"title": "..."}`)
 - **Response Schema** (`201 Created`): `ConversationRecord`
 
 ---
 
 ### `GET /api/v1/chat/list`
-List user/device conversations.
+List conversations owned by the caller's user identity.
 
+- **Required Headers**: `X-User-Name`, `X-User-Token`
 - **Query Parameters**: `limit` (default: 20), `offset` (default: 0)
 - **Response Schema** (`200 OK`): `Array<ConversationRecord>`
 
 ---
 
 ### `GET /api/v1/chat/history`
-Fetch paginated message history.
+Fetch paginated message history for a conversation.
 
+- **Required Headers**: `X-User-Name`, `X-User-Token`
 - **Query Parameters**: `conversation_id` (required), `limit`, `offset`
 - **Response Schema** (`200 OK`): `ChatHistoryResponse`
 
 ---
 
 ### `POST /api/v1/chat/query`
-Send message to Gemini 3.6 Flash assistant.
+Send message to Gemini 3.6 Flash with **Multi-Store Support** (Cloud vs Local).
 
+- **Required Headers**: `X-Request-Type` (`"user"` or `"guest"`), plus mode credential headers.
 - **Request Body**: `ChatQueryRequest`
   ```json
   {
-    "conversation_id": "...",
-    "message": "How much did I spend on groceries this month?"
+    "conversation_id": null,
+    "message": "How much did I spend on coffee this month?",
+    "conversation_history": [
+      { "role": "user", "content": "Hi" },
+      { "role": "assistant", "content": "Hello! How can I help you?" }
+    ],
+    "recent_receipts": [
+      {
+        "merchant_name": "Starbucks",
+        "total_amount": 5.50,
+        "category": "Food & Drink",
+        "date": "2026-08-10"
+      }
+    ]
   }
   ```
+
+#### Storage Modes:
+1. **Cloud Store Mode** (`conversation_id` provided):
+   - Requires `X-Request-Type: user`.
+   - Fetches history from Supabase DB, calls Gemini 3.6 Flash, persists user & assistant messages to Supabase DB.
+2. **Local Store Mode** (`conversation_id` null/omitted):
+   - Supports both **Guest** (`X-Request-Type: guest`) and **User local** (`X-Request-Type: user`).
+   - **Zero Supabase DB reads or writes**.
+   - Uses client-supplied `conversation_history` (max 20 turns) and `recent_receipts` (max 50 items) for RAG context.
+   - Returns synthetic UUIDs for `user_message` and `assistant_message` so mobile clients can save locally to Isar DB.
+
 - **Response Schema** (`200 OK`): `ChatQueryResponse`
+  ```json
+  {
+    "conversation_id": null,
+    "user_message": {
+      "id": "e3b0c442-...",
+      "conversation_id": null,
+      "sender": "user",
+      "content": "How much did I spend on coffee this month?",
+      "created_at": "2026-08-12T17:30:00Z"
+    },
+    "assistant_message": {
+      "id": "f4c1d553-...",
+      "conversation_id": null,
+      "sender": "assistant",
+      "content": "Based on your local receipts, you spent $5.50 at Starbucks on 2026-08-10.",
+      "created_at": "2026-08-12T17:30:01Z"
+    }
+  }
+  ```
 
 ---
 
 ### `DELETE /api/v1/chat/{conversation_id}`
 Soft-delete a conversation.
 
+- **Required Headers**: `X-User-Name`, `X-User-Token`
 - **Response Schema** (`200 OK`):
   ```json
   {
@@ -487,12 +549,24 @@ Check backend server health status.
 | `unit_price` | float | No | Price per unit |
 | `total_price` | float | No | Total price for line item |
 
-### `ReceiptRecord`
-| Field | Type | Description |
-| :--- | :--- | :--- |
-| `id` | string (UUID) | Unique receipt record ID |
-| `user_id` | string \| null | Owner User ID if authenticated |
-| `device_id` | string | Hardware device ID |
-| `receipt` | Receipt | Full receipt model |
-| `created_at` | datetime | ISO timestamp |
-| `deleted_at` | datetime \| null | Soft delete timestamp |
+### `ChatMessageInput`
+| Field | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `role` | string | Yes | Message sender role (`"user"` or `"assistant"`) |
+| `content` | string | Yes | Text content (1 to 4000 characters) |
+
+### `ReceiptContextItem`
+| Field | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `merchant_name` | string | Yes | Merchant name |
+| `total_amount` | float | Yes | Total expense amount |
+| `category` | string | No | Expense category |
+| `date` | string | No | Expense date (YYYY-MM-DD) |
+
+### `ChatQueryRequest`
+| Field | Type | Required | Description |
+| :--- | :--- | :--- | :--- |
+| `conversation_id` | string \| null | No | Supabase conversation UUID. Null/omitted for local store mode |
+| `message` | string | Yes | User message query (1 to 4000 characters) |
+| `conversation_history` | Array<ChatMessageInput> | No | Prior conversation turns for local/guest mode (max 20) |
+| `recent_receipts` | Array<ReceiptContextItem> | No | Local receipts for AI spending analysis RAG context (max 50) |

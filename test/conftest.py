@@ -37,12 +37,18 @@ def mock_device(client):
     assert response.status_code == 201
 
     headers = {"X-Device-Name": device_name, "X-Device-Token": device_token}
+    guest_scan_headers = {
+        "X-Request-Type": "guest",
+        "X-Device-Name": device_name,
+        "X-Device-Token": device_token,
+    }
 
     device_info = {
         "device_id": device_name,
         "device_name": device_name,
         "device_token": device_token,
         "headers": headers,
+        "guest_scan_headers": guest_scan_headers,
     }
 
     yield device_info
@@ -99,6 +105,11 @@ def mock_user_session(client, mock_device):
         "X-User-Name": username,
         "X-User-Token": password,
     }
+    user_scan_headers = {
+        "X-Request-Type": "user",
+        "X-User-Name": username,
+        "X-User-Token": password,
+    }
 
     session_info = {
         "user_id": user_id,
@@ -106,6 +117,7 @@ def mock_user_session(client, mock_device):
         "email": email,
         "password_hash": password_hash,
         "headers": headers,
+        "user_scan_headers": user_scan_headers,
         "link_headers": link_headers,
         "device_id": mock_device["device_name"],
         "device_name": mock_device["device_name"],
@@ -124,6 +136,7 @@ def mock_user_session(client, mock_device):
 @pytest.fixture(scope="function")
 def invalid_headers():
     return {
+        "X-Request-Type": "guest",
         "X-Device-Name": "FAKE-DEV-999",
         "X-Device-Token": "fake-token-that-doesnt-exist",
     }

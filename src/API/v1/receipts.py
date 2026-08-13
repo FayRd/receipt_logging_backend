@@ -46,7 +46,7 @@ async def list_receipts(
         limit,
         offset,
         identity.user_id,
-        identity.user_name,
+        identity.username,
     )
     records = await repo.get_all_by_identity(
         identity,

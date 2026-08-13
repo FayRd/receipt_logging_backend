@@ -1,7 +1,18 @@
+import uuid
 from supabase import AsyncClient
 from src.Infrastructure.logger import get_logger
 
 logger = get_logger("Services.data_migration_service")
+
+
+def _is_valid_uuid(val: str | None) -> bool:
+    if not val:
+        return False
+    try:
+        uuid.UUID(str(val))
+        return True
+    except ValueError:
+        return False
 
 
 class DataMigrationService:
@@ -16,7 +27,7 @@ class DataMigrationService:
         device_name: str,
         migrate_data: dict,
     ) -> dict:
-        """Insert guest data into Supabase tables linked to user_id."""
+        """Insert guest data into Supabase tables linked to user_id (skipping existing UUIDs)."""
         receipts: list[dict] = migrate_data.get("receipts", []) or []
         conversations: list[dict] = migrate_data.get("conversations", []) or []
         chat_messages: list[dict] = migrate_data.get("chat_messages", []) or []
@@ -34,8 +45,22 @@ class DataMigrationService:
 
         # ── 1. Receipts ────────────────────────────────────────────────────────
         if receipts:
+            # Query existing receipt UUIDs owned by this user to prevent duplicate re-insertion
+            existing_ids: set[str] = set()
+            try:
+                res_existing = await db.table("receipts").select("id").eq("user_id", user_id).execute()
+                if res_existing and res_existing.data:
+                    existing_ids = {r["id"] for r in res_existing.data if "id" in r}
+            except Exception as exc:
+                logger.warning("Could not query existing receipts for de-duplication: %s", exc)
+
             rows = []
             for item in receipts:
+                item_id = item.get("id")
+                if _is_valid_uuid(item_id) and item_id in existing_ids:
+                    logger.debug("Skipping export of already existing receipt UUID=%s", item_id)
+                    continue
+
                 rcpt_data = item.get("receipt")
                 if isinstance(rcpt_data, dict):
                     if rcpt_data.get("raw_text") is None:
@@ -52,21 +77,37 @@ class DataMigrationService:
                 if item.get("created_at"):
                     row["created_at"] = item["created_at"]
                 rows.append(row)
-            try:
-                logger.debug("Executing receipts batch insert of %d rows for user_id=%s", len(rows), user_id)
-                res = await db.table("receipts").insert(rows).execute()
-                migrated["receipts"] = len(res.data) if res and res.data else len(rows)
-                logger.info("Migrated %d receipts for user_id=%s", migrated["receipts"], user_id)
-            except Exception as exc:
-                logger.error("DataMigrationService: receipts insert failed for user_id=%s: %s", user_id, exc, exc_info=True)
+
+            if rows:
+                try:
+                    logger.debug("Executing receipts batch insert of %d rows for user_id=%s", len(rows), user_id)
+                    res = await db.table("receipts").insert(rows).execute()
+                    migrated["receipts"] = len(res.data) if res and res.data else len(rows)
+                    logger.info("Migrated %d receipts for user_id=%s", migrated["receipts"], user_id)
+                except Exception as exc:
+                    logger.error("DataMigrationService: receipts insert failed for user_id=%s: %s", user_id, exc, exc_info=True)
 
         # ── 2. Conversations ───────────────────────────────────────────────────
         conv_id_map: dict[str, str] = {}
         if conversations:
+            existing_conv_ids: set[str] = set()
+            try:
+                res_convs = await db.table("conversations").select("id").eq("user_id", user_id).execute()
+                if res_convs and res_convs.data:
+                    existing_conv_ids = {c["id"] for c in res_convs.data if "id" in c}
+            except Exception as exc:
+                logger.warning("Could not query existing conversations for de-duplication: %s", exc)
+
             rows = []
             orig_ids = []
             for item in conversations:
-                orig_ids.append(item.get("id"))
+                item_id = item.get("id")
+                if _is_valid_uuid(item_id) and item_id in existing_conv_ids:
+                    logger.debug("Conversation UUID=%s already exists in Supabase, mapping 1:1", item_id)
+                    conv_id_map[item_id] = item_id
+                    continue
+
+                orig_ids.append(item_id)
                 row = {
                     "user_id": user_id,
                     "device_id": device_name,
@@ -77,24 +118,26 @@ class DataMigrationService:
                 if item.get("updated_at"):
                     row["updated_at"] = item["updated_at"]
                 rows.append(row)
-            try:
-                logger.debug("Executing conversations batch insert of %d rows for user_id=%s", len(rows), user_id)
-                res = await db.table("conversations").insert(rows).execute()
-                inserted_rows = res.data if res and res.data else []
-                migrated["conversations"] = len(inserted_rows)
 
-                # Map local conversation ID to newly generated Supabase UUID
-                for idx, created_row in enumerate(inserted_rows):
-                    if idx < len(orig_ids) and orig_ids[idx]:
-                        conv_id_map[orig_ids[idx]] = created_row["id"]
-                logger.info(
-                    "Migrated %d conversations for user_id=%s (mapped %d conv IDs)",
-                    migrated["conversations"],
-                    user_id,
-                    len(conv_id_map),
-                )
-            except Exception as exc:
-                logger.error("DataMigrationService: conversations insert failed for user_id=%s: %s", user_id, exc, exc_info=True)
+            if rows:
+                try:
+                    logger.debug("Executing conversations batch insert of %d rows for user_id=%s", len(rows), user_id)
+                    res = await db.table("conversations").insert(rows).execute()
+                    inserted_rows = res.data if res and res.data else []
+                    migrated["conversations"] = len(inserted_rows)
+
+                    # Map local conversation ID to newly generated Supabase UUID
+                    for idx, created_row in enumerate(inserted_rows):
+                        if idx < len(orig_ids) and orig_ids[idx]:
+                            conv_id_map[orig_ids[idx]] = created_row["id"]
+                    logger.info(
+                        "Migrated %d conversations for user_id=%s (mapped %d conv IDs)",
+                        migrated["conversations"],
+                        user_id,
+                        len(conv_id_map),
+                    )
+                except Exception as exc:
+                    logger.error("DataMigrationService: conversations insert failed for user_id=%s: %s", user_id, exc, exc_info=True)
 
         # ── 3. Chat Messages ───────────────────────────────────────────────────
         if chat_messages and conv_id_map:
@@ -104,7 +147,7 @@ class DataMigrationService:
                 new_conv_id = conv_id_map.get(orig_conv_id)
                 if not new_conv_id:
                     logger.debug("Skipping message with unmapped orig_conv_id=%s", orig_conv_id)
-                    continue  # Skip messages whose parent conversation wasn't migrated
+                    continue  # Skip messages whose parent conversation wasn't mapped
 
                 row = {
                     "conversation_id": new_conv_id,

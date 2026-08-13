@@ -36,7 +36,7 @@ async def register_device(
 
     Public route — no authentication headers required.
     """
-    logger.debug("Entering register_device: device_name=%s, brand=%s, model=%s", body.device_name, body.brand, body.model)
+    logger.debug("Entering register_device: device_name=%s", body.device_name)
     device = await repo.register_or_update(body)
     if not device:
         logger.warning("Device registration/refresh failed: Invalid token for device_name=%s", body.device_name)

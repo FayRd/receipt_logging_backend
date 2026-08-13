@@ -3,6 +3,9 @@ import time
 from collections import defaultdict
 from fastapi import HTTPException, Request, status
 from src.config import get_settings
+from src.Infrastructure.logger import get_logger
+
+logger = get_logger("Auth.rate_limiter")
 
 
 class SlidingWindowRateLimiter:
@@ -33,15 +36,29 @@ class SlidingWindowRateLimiter:
             timestamps = [ts for ts in self._requests[key] if ts > window_start]
             self._requests[key] = timestamps
 
-            if len(timestamps) >= max_requests:
+            current_counter = len(timestamps)
+            logger.debug(
+                "Rate limit threshold check for key '%s': current bucket counter=%d, threshold=%d, window=%ds",
+                key, current_counter, max_requests, window_seconds
+            )
+
+            if current_counter >= max_requests:
                 # Calculate retry_after seconds until oldest request in window expires
                 oldest_timestamp = timestamps[0]
                 retry_after = int(oldest_timestamp + window_seconds - now) + 1
+                logger.warning(
+                    "Rate limit threshold exceeded for key '%s': bucket counter=%d >= threshold=%d, retry_after=%ds",
+                    key, current_counter, max_requests, max(1, retry_after)
+                )
                 return False, 0, max(1, retry_after)
 
             # Record current request timestamp
             self._requests[key].append(now)
             remaining = max_requests - len(self._requests[key])
+            logger.debug(
+                "Rate limit check passed for key '%s': updated bucket counter=%d, remaining=%d",
+                key, len(self._requests[key]), remaining
+            )
             return True, remaining, 0
 
     async def reset(self):
@@ -82,12 +99,17 @@ def rate_limit(max_requests_getter, window_seconds: int = 60):
         client_ip = request.client.host if request.client else "127.0.0.1"
         key_identifier = device_name if device_name else client_ip
         key = f"{request.url.path}:{key_identifier}"
+        logger.debug("Rate limit key generated: '%s' (identifier='%s', path='%s')", key, key_identifier, request.url.path)
 
         is_allowed, remaining, retry_after = await limiter.check_rate_limit(
             key=key, max_requests=max_requests, window_seconds=window_seconds
         )
 
         if not is_allowed:
+            logger.warning(
+                "HTTP 429 Rate Limit triggered for key '%s': limit=%d, retry_after=%ds",
+                key, max_requests, retry_after
+            )
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail=f"Rate limit exceeded. Please try again in {retry_after} seconds.",

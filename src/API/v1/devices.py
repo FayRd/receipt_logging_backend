@@ -3,6 +3,7 @@ from supabase import AsyncClient
 from src.Infrastructure.database import get_supabase_client
 from src.Auth.identity import Identity, get_device_identity, require_link_bridge_identity
 from src.Auth.rate_limiter import rate_limit
+from src.Infrastructure.logger import get_logger
 from src.Models.schemas import (
     DeviceRegisterRequest,
     DeviceLinkRequest,
@@ -13,6 +14,7 @@ from src.Models.Devices.device_repository import DeviceRepository
 from src.Services.data_migration_service import DataMigrationService
 
 router = APIRouter(prefix="/devices", tags=["Devices"])
+logger = get_logger("API.devices")
 
 
 async def get_repo(db: AsyncClient = Depends(get_supabase_client)) -> DeviceRepository:
@@ -34,12 +36,15 @@ async def register_device(
 
     Public route — no authentication headers required.
     """
+    logger.debug("Entering register_device: device_name=%s, brand=%s, model=%s", body.device_name, body.brand, body.model)
     device = await repo.register_or_update(body)
     if not device:
+        logger.warning("Device registration/refresh failed: Invalid token for device_name=%s", body.device_name)
         raise HTTPException(
             status_code=401,
             detail="Invalid device token for existing device_name.",
         )
+    logger.info("Device registered/updated successfully: device_id=%s, device_name=%s", device.get("id"), body.device_name)
     return device
 
 
@@ -57,9 +62,12 @@ async def get_my_device(
 
     Requires valid X-Device-Name and X-Device-Token headers. Omits X-User-Name and X-User-Token.
     """
+    logger.debug("Entering get_my_device: device_name=%s", identity.device_name)
     device = await repo.get_by_device_id(identity.device_name)
     if not device:
+        logger.warning("Device not found for device_name=%s", identity.device_name)
         raise HTTPException(status_code=404, detail="Device not found.")
+    logger.info("Retrieved device record: device_id=%s, device_name=%s", device.get("id"), identity.device_name)
     return device
 
 
@@ -83,8 +91,20 @@ async def link_device_user(
     If migrate_data is provided on linking, bulk-migrates guest receipts/conversations/chat_messages
     into Supabase associated with the newly linked user_id.
     """
+    logger.debug(
+        "Entering link_device_user: device_name=%s, target_username=%s, identity (device_name=%s, user_id=%s)",
+        body.device_name,
+        body.username,
+        identity.device_name,
+        identity.user_id,
+    )
     target_device = await repo.get_by_device_id(body.device_name)
     if not target_device or target_device["name"] != identity.device_name:
+        logger.warning(
+            "Device link forbidden: target device_name '%s' does not match identity device_name '%s'",
+            body.device_name,
+            identity.device_name,
+        )
         raise HTTPException(
             status_code=403,
             detail="Cannot modify link status for another device_name.",
@@ -92,6 +112,7 @@ async def link_device_user(
 
     device = await repo.link_user_by_names(body.device_name, body.username)
     if not device:
+        logger.warning("Device link failed: Invalid credentials or unregistered device_name '%s'", body.device_name)
         raise HTTPException(
             status_code=401,
             detail="Device not registered or invalid user credentials.",
@@ -106,6 +127,7 @@ async def link_device_user(
             else body.migrate_data
         )
         if isinstance(payload, dict):
+            logger.info("Migrating guest data for user_id=%s, device_name=%s", target_user_id, body.device_name)
             await DataMigrationService.migrate_user_data(
                 db=db,
                 user_id=target_user_id,
@@ -113,6 +135,7 @@ async def link_device_user(
                 migrate_data=payload,
             )
 
+    logger.info("Device linked successfully: device_name=%s, username=%s", body.device_name, body.username)
     return device
 
 
@@ -130,12 +153,15 @@ async def delete_my_device(
 
     Requires valid X-Device-Name and X-Device-Token headers. Omits user headers.
     """
+    logger.debug("Entering delete_my_device: device_name=%s", identity.device_name)
     deleted = await repo.soft_delete(identity.device_name)
     if not deleted:
+        logger.warning("Soft-delete device failed: Device record not found or already deleted for device_name=%s", identity.device_name)
         raise HTTPException(
             status_code=404,
             detail="Device record not found or already deleted.",
         )
+    logger.info("Device soft-deleted successfully: device_name=%s", identity.device_name)
     return {"success": True, "device_name": identity.device_name}
 
 
@@ -156,7 +182,11 @@ async def rotate_device_token_endpoint(
     Requires valid X-Device-Name and X-Device-Token (current token) headers.
     Updates stored device_token_hash to new_device_token and returns updated record.
     """
+    logger.debug("Entering rotate_device_token_endpoint: device_name=%s", identity.device_name)
     device = await repo.rotate_device_token(identity.device_name, body.new_device_token)
     if not device:
+        logger.warning("Token rotation failed: Device record not found for device_name=%s", identity.device_name)
         raise HTTPException(status_code=404, detail="Device record not found.")
+    logger.info("Device token rotated successfully for device_name=%s", identity.device_name)
     return device
+

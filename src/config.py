@@ -47,6 +47,12 @@ class Settings(BaseSettings):
     sse_batch_timeout_seconds: int = 300          # Max wait before emitting timeout
     redis_job_ttl_seconds: int = 600              # Redis job and batch expiration TTL (10 minutes)
 
+    # Togglable Logging Configuration
+    enable_file_logging: bool = True
+    log_file_path: str = "app.log"
+    log_level: str = "DEBUG"
+    enable_console_logging: bool = True
+
 
 @lru_cache
 def get_settings() -> Settings:

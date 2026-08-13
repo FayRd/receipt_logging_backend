@@ -3,6 +3,7 @@ from supabase import AsyncClient
 from src.Infrastructure.database import get_supabase_client
 from src.Auth.identity import Identity, get_user_identity
 from src.Auth.rate_limiter import rate_limit
+from src.Infrastructure.logger import get_logger
 from src.Models.schemas import (
     ReceiptRecord,
     ReceiptCreateRequest,
@@ -11,6 +12,7 @@ from src.Models.schemas import (
 from src.Models.Receipts.receipt_repository import ReceiptRepository
 
 router = APIRouter(prefix="/receipts", tags=["Receipts"])
+logger = get_logger("API.receipts")
 
 
 async def get_repo(db: AsyncClient = Depends(get_supabase_client)) -> ReceiptRepository:
@@ -38,12 +40,22 @@ async def list_receipts(
     `limit` (number of records) and `offset` (starting position).
     Results are ordered by updated_at DESC.
     """
-    return await repo.get_all_by_identity(
+    logger.debug(
+        "Entering list_receipts: updated_after=%s, limit=%s, offset=%s, identity (user_id=%s, username=%s)",
+        updated_after,
+        limit,
+        offset,
+        identity.user_id,
+        identity.user_name,
+    )
+    records = await repo.get_all_by_identity(
         identity,
         updated_after=updated_after,
         limit=limit,
         offset=offset,
     )
+    logger.info("list_receipts fetched %d records for user_id=%s", len(records), identity.user_id)
+    return records
 
 
 # ── GET single receipt ────────────────────────────────────────────────────────
@@ -58,9 +70,12 @@ async def get_receipt(
     repo: ReceiptRepository = Depends(get_repo),
 ):
     """Get a single receipt by ID. Requires X-User-Name and X-User-Token headers."""
+    logger.debug("Entering get_receipt: receipt_id=%s, identity (user_id=%s)", receipt_id, identity.user_id)
     data = await repo.get_by_id(receipt_id, identity)
     if not data:
+        logger.warning("Receipt not found: receipt_id=%s, user_id=%s", receipt_id, identity.user_id)
         raise HTTPException(status_code=404, detail="Receipt not found")
+    logger.info("get_receipt successful: receipt_id=%s, user_id=%s", receipt_id, identity.user_id)
     return data
 
 
@@ -77,7 +92,20 @@ async def create_receipt(
     repo: ReceiptRepository = Depends(get_repo),
 ):
     """Create a single receipt bound to the caller's authenticated user identity."""
-    return await repo.create(identity, body.receipt)
+    logger.debug(
+        "Entering create_receipt: merchant=%s, total_amount=%s, identity (user_id=%s)",
+        body.receipt.merchant_name,
+        body.receipt.total_amount,
+        identity.user_id,
+    )
+    record = await repo.create(identity, body.receipt)
+    logger.info(
+        "Receipt created successfully: receipt_id=%s, merchant=%s, user_id=%s",
+        record.id,
+        record.merchant_name,
+        identity.user_id,
+    )
+    return record
 
 
 # ── CREATE batch receipts ─────────────────────────────────────────────────────
@@ -93,7 +121,18 @@ async def create_receipts_batch(
     repo: ReceiptRepository = Depends(get_repo),
 ):
     """Batch-create up to 100 receipts bound to the caller's authenticated user identity."""
-    return await repo.create_batch(identity, body.receipts)
+    logger.debug(
+        "Entering create_receipts_batch: batch_count=%d, identity (user_id=%s)",
+        len(body.receipts),
+        identity.user_id,
+    )
+    records = await repo.create_batch(identity, body.receipts)
+    logger.info(
+        "Batch receipts created successfully: created_count=%d, user_id=%s",
+        len(records),
+        identity.user_id,
+    )
+    return records
 
 
 # ── SOFT DELETE receipt ───────────────────────────────────────────────────────
@@ -108,10 +147,18 @@ async def delete_receipt(
     repo: ReceiptRepository = Depends(get_repo),
 ):
     """Soft-delete a receipt owned by the caller's authenticated user identity."""
+    logger.debug("Entering delete_receipt: receipt_id=%s, identity (user_id=%s)", receipt_id, identity.user_id)
     deleted = await repo.soft_delete(receipt_id, identity)
     if not deleted:
+        logger.warning(
+            "Delete receipt failed - not found or already deleted: receipt_id=%s, user_id=%s",
+            receipt_id,
+            identity.user_id,
+        )
         raise HTTPException(
             status_code=404,
             detail="Receipt not found or already deleted",
         )
+    logger.info("Receipt soft-deleted successfully: receipt_id=%s, user_id=%s", receipt_id, identity.user_id)
     return {"success": True, "receipt_id": receipt_id}
+

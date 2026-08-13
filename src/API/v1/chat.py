@@ -5,6 +5,7 @@ from supabase import AsyncClient
 from src.Infrastructure.database import get_supabase_client
 from src.Auth.identity import Identity, get_user_identity, get_scoped_identity
 from src.Auth.rate_limiter import rate_limit
+from src.Infrastructure.logger import get_logger
 from src.Models.schemas import (
     ChatMessageInput,
     ChatMessageRecord,
@@ -20,6 +21,7 @@ from src.Services.chat_service import ChatService
 from src.config import get_settings
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
+logger = get_logger("API.chat")
 
 
 async def get_repo(db: AsyncClient = Depends(get_supabase_client)) -> ConversationRepository:
@@ -50,14 +52,22 @@ async def create_conversation(
     Enforces a hard cap of 10 active conversations per user identity.
     Returns HTTP 400 when the limit is reached.
     """
+    logger.debug("Entering create_conversation: title=%s, identity (user_id=%s)", body.title, identity.user_id)
     settings = get_settings()
     current_count = await repo.count_conversations(identity)
     if current_count >= settings.max_conversations_per_identity:
+        logger.warning(
+            "Conversation limit reached for user_id=%s: current_count=%d, max=%d",
+            identity.user_id,
+            current_count,
+            settings.max_conversations_per_identity,
+        )
         raise HTTPException(
             status_code=400,
             detail=f"Maximum limit of {settings.max_conversations_per_identity} conversations reached for this user identity.",
         )
     data = await repo.create_conversation(identity, body.title)
+    logger.info("Conversation created successfully: conv_id=%s, title=%s, user_id=%s", data.id, data.title, identity.user_id)
     return data
 
 
@@ -74,7 +84,9 @@ async def list_conversations(
     repo: ConversationRepository = Depends(get_repo),
 ):
     """List all conversations owned by the caller's authenticated user identity, newest first."""
+    logger.debug("Entering list_conversations: limit=%d, offset=%d, identity (user_id=%s)", limit, offset, identity.user_id)
     data = await repo.list_conversations(identity, limit=limit, offset=offset)
+    logger.info("list_conversations returned %d records for user_id=%s", len(data), identity.user_id)
     return data
 
 
@@ -96,14 +108,33 @@ async def get_chat_history(
     Verifies conversation ownership against the caller's authenticated user identity.
     Returns HTTP 404 if not found or not owned by caller.
     """
+    logger.debug(
+        "Entering get_chat_history: conversation_id=%s, limit=%d, offset=%d, identity (user_id=%s)",
+        conversation_id,
+        limit,
+        offset,
+        identity.user_id,
+    )
     conv = await repo.get_conversation(conversation_id, identity)
     if not conv:
+        logger.warning(
+            "Chat history failed: Conversation not found or not owned by user_id=%s (conv_id=%s)",
+            identity.user_id,
+            conversation_id,
+        )
         raise HTTPException(status_code=404, detail="Conversation not found")
 
     messages, total_count = await repo.get_messages(
         conversation_id, limit=limit, offset=offset
     )
     has_more = (offset + len(messages)) < total_count
+
+    logger.info(
+        "Retrieved chat history for conv_id=%s: fetched_count=%d, total_count=%d",
+        conversation_id,
+        len(messages),
+        total_count,
+    )
 
     return ChatHistoryResponse(
         conversation_id=conversation_id,
@@ -137,16 +168,26 @@ async def send_chat_query(
         - Returns synthetic UUIDs for both messages so clients can save locally to Isar DB.
         - Supports both Guest (device identity) and User local mode.
     """
+    logger.debug(
+        "Entering send_chat_query: cloud_mode=%s, conv_id=%s, msg_len=%d, identity (user_id=%s, device_id=%s)",
+        bool(body.conversation_id),
+        body.conversation_id,
+        len(body.message),
+        identity.user_id,
+        identity.device_id,
+    )
     # ── Cloud Store Mode ────────────────────────────────────────────────────────
     if body.conversation_id:
         # Cloud store requires user authentication (not guest)
         if not identity.is_authenticated:
+            logger.warning("Chat query failed: Cloud store mode requires user authentication")
             raise HTTPException(
                 status_code=401,
                 detail="Cloud store mode requires user authentication (X-Request-Type: user).",
             )
         conv = await repo.get_conversation(body.conversation_id, identity)
         if not conv:
+            logger.warning("Chat query failed: Conversation %s not found for user_id=%s", body.conversation_id, identity.user_id)
             raise HTTPException(status_code=404, detail="Conversation not found")
 
         # Fetch recent message history for rolling context window
@@ -158,6 +199,13 @@ async def send_chat_query(
         # Persist both messages to Supabase DB
         user_msg = await repo.add_message(body.conversation_id, "user", body.message)
         ai_msg = await repo.add_message(body.conversation_id, "assistant", ai_response_text)
+
+        logger.info(
+            "Chat query processed (Cloud Mode): conv_id=%s, user_msg_id=%s, assistant_msg_id=%s",
+            body.conversation_id,
+            user_msg.id,
+            ai_msg.id,
+        )
 
         return ChatQueryResponse(
             conversation_id=body.conversation_id,
@@ -189,6 +237,12 @@ async def send_chat_query(
         created_at=now_iso,
     )
 
+    logger.info(
+        "Chat query processed (Local Mode): synthetic user_msg_id=%s, assistant_msg_id=%s",
+        user_msg.id,
+        ai_msg.id,
+    )
+
     return ChatQueryResponse(
         conversation_id=None,
         user_message=user_msg,
@@ -212,10 +266,18 @@ async def delete_conversation(
     Verifies that the conversation is owned by the caller's authenticated user identity.
     Returns HTTP 404 if not found, already deleted, or not owned by caller.
     """
+    logger.debug("Entering delete_conversation: conversation_id=%s, identity (user_id=%s)", conversation_id, identity.user_id)
     deleted = await repo.soft_delete(conversation_id, identity)
     if not deleted:
+        logger.warning(
+            "Delete conversation failed: Conv_id %s not found or already deleted for user_id=%s",
+            conversation_id,
+            identity.user_id,
+        )
         raise HTTPException(
             status_code=404,
             detail="Conversation not found or already deleted.",
         )
+    logger.info("Conversation soft-deleted successfully: conv_id=%s, user_id=%s", conversation_id, identity.user_id)
     return {"success": True, "conversation_id": conversation_id}
+

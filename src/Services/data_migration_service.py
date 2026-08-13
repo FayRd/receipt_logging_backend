@@ -1,7 +1,7 @@
-import logging
 from supabase import AsyncClient
+from src.Infrastructure.logger import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger("Services.data_migration_service")
 
 
 class DataMigrationService:
@@ -16,24 +16,19 @@ class DataMigrationService:
         device_name: str,
         migrate_data: dict,
     ) -> dict:
-        """Insert guest data into Supabase tables linked to user_id.
-
-        Omits local non-UUID string IDs so PostgreSQL DEFAULT gen_random_uuid() generates
-        valid primary key UUIDs natively. Re-links chat message conversation IDs using
-        the newly created Supabase conversation UUIDs.
-
-        Args:
-            db:           Supabase async client.
-            user_id:      UUID of the newly registered / linked user.
-            device_name:  Hardware device name (device.name) used as device_id FK.
-            migrate_data: JSON payload with keys: receipts, conversations, chat_messages.
-
-        Returns:
-            dict with migrated counts per table.
-        """
+        """Insert guest data into Supabase tables linked to user_id."""
         receipts: list[dict] = migrate_data.get("receipts", []) or []
         conversations: list[dict] = migrate_data.get("conversations", []) or []
         chat_messages: list[dict] = migrate_data.get("chat_messages", []) or []
+
+        logger.debug(
+            "migrate_user_data called: user_id=%s, device_name=%s, input_receipts=%d, input_conversations=%d, input_messages=%d",
+            user_id,
+            device_name,
+            len(receipts),
+            len(conversations),
+            len(chat_messages),
+        )
 
         migrated: dict = {"receipts": 0, "conversations": 0, "chat_messages": 0}
 
@@ -58,10 +53,12 @@ class DataMigrationService:
                     row["created_at"] = item["created_at"]
                 rows.append(row)
             try:
+                logger.debug("Executing receipts batch insert of %d rows for user_id=%s", len(rows), user_id)
                 res = await db.table("receipts").insert(rows).execute()
                 migrated["receipts"] = len(res.data) if res and res.data else len(rows)
+                logger.info("Migrated %d receipts for user_id=%s", migrated["receipts"], user_id)
             except Exception as exc:
-                logger.error("DataMigrationService: receipts insert failed: %s", exc, exc_info=True)
+                logger.error("DataMigrationService: receipts insert failed for user_id=%s: %s", user_id, exc, exc_info=True)
 
         # ── 2. Conversations ───────────────────────────────────────────────────
         conv_id_map: dict[str, str] = {}
@@ -81,6 +78,7 @@ class DataMigrationService:
                     row["updated_at"] = item["updated_at"]
                 rows.append(row)
             try:
+                logger.debug("Executing conversations batch insert of %d rows for user_id=%s", len(rows), user_id)
                 res = await db.table("conversations").insert(rows).execute()
                 inserted_rows = res.data if res and res.data else []
                 migrated["conversations"] = len(inserted_rows)
@@ -89,8 +87,14 @@ class DataMigrationService:
                 for idx, created_row in enumerate(inserted_rows):
                     if idx < len(orig_ids) and orig_ids[idx]:
                         conv_id_map[orig_ids[idx]] = created_row["id"]
+                logger.info(
+                    "Migrated %d conversations for user_id=%s (mapped %d conv IDs)",
+                    migrated["conversations"],
+                    user_id,
+                    len(conv_id_map),
+                )
             except Exception as exc:
-                logger.error("DataMigrationService: conversations insert failed: %s", exc, exc_info=True)
+                logger.error("DataMigrationService: conversations insert failed for user_id=%s: %s", user_id, exc, exc_info=True)
 
         # ── 3. Chat Messages ───────────────────────────────────────────────────
         if chat_messages and conv_id_map:
@@ -99,6 +103,7 @@ class DataMigrationService:
                 orig_conv_id = item.get("conversation_id")
                 new_conv_id = conv_id_map.get(orig_conv_id)
                 if not new_conv_id:
+                    logger.debug("Skipping message with unmapped orig_conv_id=%s", orig_conv_id)
                     continue  # Skip messages whose parent conversation wasn't migrated
 
                 row = {
@@ -111,14 +116,18 @@ class DataMigrationService:
                 rows.append(row)
             if rows:
                 try:
+                    logger.debug("Executing chat_messages batch insert of %d rows for user_id=%s", len(rows), user_id)
                     res = await db.table("chat_messages").insert(rows).execute()
                     migrated["chat_messages"] = len(res.data) if res and res.data else len(rows)
+                    logger.info("Migrated %d chat_messages for user_id=%s", migrated["chat_messages"], user_id)
                 except Exception as exc:
-                    logger.error("DataMigrationService: chat_messages insert failed: %s", exc, exc_info=True)
+                    logger.error("DataMigrationService: chat_messages insert failed for user_id=%s: %s", user_id, exc, exc_info=True)
+        elif chat_messages and not conv_id_map:
+            logger.warning("chat_messages present (%d) but no conversations were mapped; skipping message migration", len(chat_messages))
 
         logger.info(
-            "DataMigrationService: migrated guest data for user_id=%s device_name=%s "
-            "— receipts=%d conversations=%d chat_messages=%d",
+            "DataMigrationService: completed migration for user_id=%s device_name=%s "
+            "— receipts=%d, conversations=%d, chat_messages=%d",
             user_id,
             device_name,
             migrated["receipts"],
@@ -126,3 +135,4 @@ class DataMigrationService:
             migrated["chat_messages"],
         )
         return migrated
+

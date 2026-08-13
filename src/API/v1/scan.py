@@ -1,6 +1,5 @@
 import asyncio
 import json
-import logging
 import uuid
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import StreamingResponse
@@ -8,12 +7,13 @@ from fastapi.responses import StreamingResponse
 import redis.asyncio as aioredis
 from src.Auth.identity import Identity, get_scoped_identity, get_sse_identity
 from src.Auth.rate_limiter import rate_limit
+from src.Infrastructure.logger import get_logger
 from src.Models.schemas import BulkBatchStatusResponse, BulkJobCreateResponse, Receipt, ScanContext, ScanResponse
 from src.Services.extraction_service import ExtractionService
 from src.config import get_settings
 
 router = APIRouter(prefix="/scan", tags=["Scanning"])
-logger = logging.getLogger("receipt_scanner")
+logger = get_logger("API.scan")
 
 # Module-level Redis reference, initialised by main lifespan
 redis_client: aioredis.Redis | None = None
@@ -103,13 +103,27 @@ async def parse_receipt(
     Requires device authentication (X-Device-ID and X-Device-Token).
     Enforces dynamic upload size ceiling, document validation confidence threshold, and rate limits.
     """
+    logger.debug(
+        "Entering parse_receipt: filename=%s, content_type=%s, identity (user_id=%s, device_id=%s)",
+        image.filename,
+        image.content_type,
+        identity.user_id,
+        identity.device_id,
+    )
     settings = get_settings()
 
     try:
         image_bytes = await image.read()
+        logger.debug("Read receipt image bytes: size=%d bytes", len(image_bytes))
 
         # Enforce maximum upload ceiling to prevent DoS & memory exhaustion
         if len(image_bytes) > settings.max_image_size_bytes:
+            logger.warning(
+                "Image file size %d exceeds max limit %d bytes (filename=%s)",
+                len(image_bytes),
+                settings.max_image_size_bytes,
+                image.filename,
+            )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Image file size exceeds maximum limit of {settings.max_image_size_bytes // (1024 * 1024)}MB.",
@@ -128,6 +142,12 @@ async def parse_receipt(
 
         # Enforce document validation threshold (must be >= confidence_threshold for valid receipts / financial statements)
         if receipt.confidence_score < settings.confidence_threshold:
+            logger.warning(
+                "Document confidence score %.2f is below threshold %.2f (filename=%s)",
+                receipt.confidence_score,
+                settings.confidence_threshold,
+                image.filename,
+            )
             return ScanResponse(
                 success=False,
                 data=None,
@@ -137,9 +157,16 @@ async def parse_receipt(
                 ),
             )
 
+        logger.info(
+            "Parse receipt successful: merchant=%s, total=%.2f, confidence=%.2f",
+            receipt.merchant_name,
+            receipt.total_amount,
+            receipt.confidence_score,
+        )
         return ScanResponse(success=True, data=receipt, error=None)
 
     except HTTPException as he:
+        logger.warning("HTTPException in parse_receipt: status_code=%d, detail=%s", he.status_code, he.detail)
         raise he
     except Exception as e:
         # Log raw exception internally for server diagnostics without exposing tracebacks to client
@@ -196,7 +223,14 @@ async def parse_many_receipts(
     Requires device authentication (X-Device-ID and X-Device-Token).
     Enforces a strict batch size of 2 to 10 images per request and per-file size ceiling.
     """
+    logger.debug(
+        "Entering parse_many_receipts: file_count=%d, identity (user_id=%s, device_id=%s)",
+        len(files),
+        identity.user_id,
+        identity.device_id,
+    )
     if not redis_client:
+        logger.error("Redis client unavailable for parse_many_receipts")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Redis service unavailable. Please check Redis connection.",
@@ -204,6 +238,7 @@ async def parse_many_receipts(
 
     # Enforce file count bounds: min 2, max 10
     if len(files) < 2 or len(files) > 10:
+        logger.warning("Bulk receipt parsing invalid file count: %d (must be 2-10)", len(files))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Bulk receipt parsing requires between 2 and 10 image files. Received {len(files)} files.",
@@ -215,6 +250,12 @@ async def parse_many_receipts(
     for file in files:
         image_bytes = await file.read()
         if len(image_bytes) > settings.max_image_size_bytes:
+            logger.warning(
+                "File '%s' size %d exceeds max allowed size %d",
+                file.filename,
+                len(image_bytes),
+                settings.max_image_size_bytes,
+            )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"File '{file.filename}' exceeds maximum allowed size of {settings.max_image_size_bytes // (1024 * 1024)}MB.",
@@ -255,12 +296,19 @@ async def parse_many_receipts(
 
         await redis_client.expire(batch_key, settings.redis_job_ttl_seconds)
 
+        logger.info(
+            "Bulk parse batch created: batch_id=%s, total_jobs=%d",
+            batch_id,
+            len(jobs_response),
+        )
+
         return {
             "batch_id": batch_id,
             "total_jobs": len(jobs_response),
             "jobs": jobs_response,
         }
     except HTTPException as he:
+        logger.warning("HTTPException in parse_many_receipts: status_code=%d, detail=%s", he.status_code, he.detail)
         raise he
     except Exception as e:
         logger.error(f"Bulk job creation error: {e}", exc_info=True)
@@ -277,7 +325,9 @@ async def parse_many_receipts(
 )
 async def get_parse_many_batch_status(batch_id: str) -> BulkBatchStatusResponse:
     """Retrieve status and extracted payload data for all jobs under a batch_id."""
+    logger.debug("Entering get_parse_many_batch_status: batch_id=%s", batch_id)
     if not redis_client:
+        logger.error("Redis service unavailable when querying batch status for %s", batch_id)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Redis service unavailable. Please check Redis connection.",
@@ -288,6 +338,7 @@ async def get_parse_many_batch_status(batch_id: str) -> BulkBatchStatusResponse:
         job_ids = await redis_client.smembers(batch_key)
 
         if not job_ids:
+            logger.warning("Batch ID not found or expired: batch_id=%s", batch_id)
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Batch ID not found or expired",
@@ -322,6 +373,13 @@ async def get_parse_many_batch_status(batch_id: str) -> BulkBatchStatusResponse:
                 }
                 jobs_data.append(job_entry)
 
+        logger.info(
+            "Retrieved batch status: batch_id=%s, total_jobs=%d, completed_jobs=%d",
+            batch_id,
+            len(job_ids),
+            completed_count,
+        )
+
         return {
             "batch_id": batch_id,
             "total_jobs": len(job_ids),
@@ -329,6 +387,7 @@ async def get_parse_many_batch_status(batch_id: str) -> BulkBatchStatusResponse:
             "jobs": jobs_data,
         }
     except HTTPException as he:
+        logger.warning("HTTPException in get_parse_many_batch_status: status_code=%d, detail=%s", he.status_code, he.detail)
         raise he
     except Exception as e:
         logger.error(f"Error fetching batch status for {batch_id}: {e}", exc_info=True)
@@ -367,6 +426,12 @@ async def stream_parse_many_batch(
         event: error
         data: {"error": "Invalid batch or service unavailable"}
     """
+    logger.debug(
+        "Entering stream_parse_many_batch: batch_id=%s, identity (user_id=%s, device_id=%s)",
+        batch_id,
+        identity.user_id,
+        identity.device_id,
+    )
     settings = get_settings()
     poll_interval = settings.sse_poll_interval_seconds
     timeout = settings.sse_batch_timeout_seconds
@@ -420,3 +485,4 @@ async def stream_parse_many_batch(
             "Connection": "keep-alive",
         },
     )
+

@@ -3,9 +3,12 @@ from fastapi import Depends, Header, HTTPException, Request, status
 from pydantic import BaseModel
 from supabase import AsyncClient
 from src.Infrastructure.database import get_supabase_client
+from src.Infrastructure.logger import get_logger
 from src.Models.Devices.device_repository import DeviceRepository
 from src.Models.Users.user_repository import UserRepository
 from src.Auth.device_security import hash_device_token
+
+logger = get_logger("Auth.identity")
 
 
 class Identity(BaseModel):
@@ -42,6 +45,12 @@ async def get_device_identity(
     clean_device_name = x_device_name.strip()
     clean_device_token = x_device_token.strip()
 
+    logger.debug(
+        "Parsing device headers: X-Device-Name/X-Device-ID='%s', X-Device-Token='%s'",
+        clean_device_name,
+        "[PRESENT]" if clean_device_token else "[EMPTY]",
+    )
+
     if not clean_device_name or not clean_device_token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -61,10 +70,12 @@ async def get_device_identity(
     stored_hash = device.get("device_token_hash", "")
 
     if not secrets.compare_digest(incoming_hash.encode("utf-8"), stored_hash.encode("utf-8")):
+        logger.warning("Constant-time digest comparison FAIL for device token (device_name='%s')", clean_device_name)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid device authentication token.",
         )
+    logger.debug("Constant-time digest comparison PASS for device token (device_name='%s')", clean_device_name)
 
     db_user_id = device.get("user_id")
     db_username = None
@@ -75,12 +86,18 @@ async def get_device_identity(
             db_username = user_row.get("username")
 
     canonical_name = device.get("name", clean_device_name)
-    return Identity(
+    identity = Identity(
         user_id=db_user_id,
         username=db_username,
         device_id=device["id"],
         device_name=canonical_name,
     )
+    resolution_mode = "user" if identity.is_authenticated else "device"
+    logger.info(
+        "Identity resolved (mode=%s): user_id=%s, username=%s, device_id=%s, device_name=%s",
+        resolution_mode, db_user_id, db_username, device["id"], canonical_name
+    )
+    return identity
 
 
 # Alias for backward compatibility on device endpoints
@@ -109,6 +126,12 @@ async def get_user_identity(
     clean_username = x_user_name.strip()
     clean_user_token = x_user_token.strip()
 
+    logger.debug(
+        "Parsing user headers: X-User-Name/X-User-ID='%s', X-User-Token='%s'",
+        clean_username,
+        "[PRESENT]" if clean_user_token else "[EMPTY]",
+    )
+
     if not clean_username or not clean_user_token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -128,17 +151,21 @@ async def get_user_identity(
     incoming_user_hash = UserRepository.hash_password(clean_user_token)
 
     if not secrets.compare_digest(incoming_user_hash.encode("utf-8"), stored_password_hash.encode("utf-8")):
+        logger.warning("Constant-time digest comparison FAIL for user token (username='%s')", clean_username)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid user authentication token.",
         )
+    logger.debug("Constant-time digest comparison PASS for user token (username='%s')", clean_username)
 
-    return Identity(
+    identity = Identity(
         user_id=user["id"],
         username=user["username"],
         device_id="",
         device_name="",
     )
+    logger.info("Identity resolved (mode=user): user_id=%s, username=%s", user["id"], user["username"])
+    return identity
 
 
 # Alias for backward compatibility on user-authenticated routes
@@ -162,6 +189,14 @@ async def require_link_bridge_identity(
     clean_device_name = x_device_name.strip() if x_device_name else ""
     clean_device_token = x_device_token.strip() if x_device_token else ""
 
+    logger.debug(
+        "Parsing link bridge headers: X-Device-Name/X-Device-ID='%s', X-Device-Token='%s', X-User-Name/X-User-ID='%s', X-User-Token='%s'",
+        clean_device_name,
+        "[PRESENT]" if clean_device_token else "[EMPTY]",
+        x_user_name,
+        "[PRESENT]" if x_user_token else "[NONE]",
+    )
+
     if not clean_device_name or not clean_device_token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -180,10 +215,12 @@ async def require_link_bridge_identity(
     incoming_device_hash = hash_device_token(clean_device_token)
     stored_device_hash = device.get("device_token_hash", "")
     if not secrets.compare_digest(incoming_device_hash.encode("utf-8"), stored_device_hash.encode("utf-8")):
+        logger.warning("Constant-time digest comparison FAIL for link bridge device token (device_name='%s')", clean_device_name)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid device authentication token.",
         )
+    logger.debug("Constant-time digest comparison PASS for link bridge device token (device_name='%s')", clean_device_name)
 
     # 2. Verify User Identity if user credentials headers are provided
     db_user_id = device.get("user_id")
@@ -203,20 +240,28 @@ async def require_link_bridge_identity(
         stored_password_hash = user.get("password", "")
         incoming_user_hash = UserRepository.hash_password(clean_user_token)
         if not secrets.compare_digest(incoming_user_hash.encode("utf-8"), stored_password_hash.encode("utf-8")):
+            logger.warning("Constant-time digest comparison FAIL for link bridge user token (username='%s')", clean_username)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid user authentication token.",
             )
+        logger.debug("Constant-time digest comparison PASS for link bridge user token (username='%s')", clean_username)
         db_user_id = user["id"]
         db_username = user["username"]
 
     canonical_name = device.get("name", clean_device_name)
-    return Identity(
+    identity = Identity(
         user_id=db_user_id,
         username=db_username,
         device_id=device["id"],
         device_name=canonical_name,
     )
+    resolution_mode = "user" if identity.is_authenticated else "device"
+    logger.info(
+        "Identity resolved (mode=%s): user_id=%s, username=%s, device_id=%s, device_name=%s",
+        resolution_mode, db_user_id, db_username, device["id"], canonical_name
+    )
+    return identity
 
 
 # Alias for device link route dependency
@@ -248,6 +293,15 @@ async def get_scoped_identity(
     """
     req_type = x_request_type.strip().lower()
 
+    logger.debug(
+        "Parsing scoped identity headers: X-Request-Type='%s', X-Device-Name/X-Device-ID='%s', X-Device-Token='%s', X-User-Name/X-User-ID='%s', X-User-Token='%s'",
+        req_type,
+        x_device_name,
+        "[PRESENT]" if x_device_token else "[NONE]",
+        x_user_name,
+        "[PRESENT]" if x_user_token else "[NONE]",
+    )
+
     if req_type == "guest":
         # User credential headers must be absent to prevent header confusion
         if x_user_name or x_user_token:
@@ -273,10 +327,13 @@ async def get_scoped_identity(
         incoming_hash = hash_device_token(clean_device_token)
         stored_hash = device.get("device_token_hash", "")
         if not secrets.compare_digest(incoming_hash.encode("utf-8"), stored_hash.encode("utf-8")):
+            logger.warning("Constant-time digest comparison FAIL for guest device token (device_name='%s')", clean_device_name)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid device authentication token.",
             )
+        logger.debug("Constant-time digest comparison PASS for guest device token (device_name='%s')", clean_device_name)
+
         db_user_id = device.get("user_id")
         db_username = None
         if db_user_id:
@@ -285,12 +342,17 @@ async def get_scoped_identity(
             if user_row:
                 db_username = user_row.get("username")
         canonical_name = device.get("name", clean_device_name)
-        return Identity(
+        identity = Identity(
             user_id=db_user_id,
             username=db_username,
             device_id=device["id"],
             device_name=canonical_name,
         )
+        logger.info(
+            "Identity resolved (mode=guest): user_id=%s, username=%s, device_id=%s, device_name=%s",
+            db_user_id, db_username, device["id"], canonical_name
+        )
+        return identity
 
     elif req_type == "user":
         # Device credential headers must be absent to prevent header confusion
@@ -317,23 +379,27 @@ async def get_scoped_identity(
         stored_password_hash = user.get("password", "")
         incoming_user_hash = UserRepository.hash_password(clean_user_token)
         if not secrets.compare_digest(incoming_user_hash.encode("utf-8"), stored_password_hash.encode("utf-8")):
+            logger.warning("Constant-time digest comparison FAIL for user token (username='%s')", clean_username)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid user authentication token.",
             )
-        return Identity(
+        logger.debug("Constant-time digest comparison PASS for user token (username='%s')", clean_username)
+
+        identity = Identity(
             user_id=user["id"],
             username=user["username"],
             device_id="",
             device_name="",
         )
+        logger.info("Identity resolved (mode=user): user_id=%s, username=%s", user["id"], user["username"])
+        return identity
 
     else:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid X-Request-Type header value. Must be 'user' or 'guest'.",
         )
-
 
 
 # ── 4. SSE STREAMING IDENTITY ──────────────────────────────────────────────────
@@ -345,6 +411,13 @@ async def get_sse_identity(
     device_name = (request.headers.get("X-Device-Name") or request.headers.get("X-Device-ID") or request.query_params.get("device_name") or request.query_params.get("device_id") or "").strip()
     device_token = (request.headers.get("X-Device-Token") or request.query_params.get("device_token") or "").strip()
     username = (request.headers.get("X-User-Name") or request.headers.get("X-User-ID") or request.query_params.get("username") or request.query_params.get("user_id") or "").strip() or None
+
+    logger.debug(
+        "Parsing SSE identity headers/params: X-Device-Name/X-Device-ID='%s', X-Device-Token='%s', X-User-Name/X-User-ID='%s'",
+        device_name,
+        "[PRESENT]" if device_token else "[EMPTY]",
+        username,
+    )
 
     if not device_name or not device_token:
         raise HTTPException(
@@ -365,11 +438,19 @@ async def get_sse_identity(
     stored_hash = device.get("device_token_hash", "")
 
     if not secrets.compare_digest(incoming_hash.encode("utf-8"), stored_hash.encode("utf-8")):
+        logger.warning("Constant-time digest comparison FAIL for SSE device token (device_name='%s')", device_name)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid device authentication token.",
         )
+    logger.debug("Constant-time digest comparison PASS for SSE device token (device_name='%s')", device_name)
 
     db_user_id = device.get("user_id")
     canonical_name = device.get("name", device_name)
-    return Identity(user_id=db_user_id, username=username, device_id=device["id"], device_name=canonical_name)
+    identity = Identity(user_id=db_user_id, username=username, device_id=device["id"], device_name=canonical_name)
+    resolution_mode = "user" if identity.is_authenticated else "device"
+    logger.info(
+        "Identity resolved (mode=%s/sse): user_id=%s, username=%s, device_id=%s, device_name=%s",
+        resolution_mode, db_user_id, username, device["id"], canonical_name
+    )
+    return identity

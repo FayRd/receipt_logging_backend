@@ -1,7 +1,10 @@
 from google import genai
 from google.genai import types
+from src.Infrastructure.logger import get_logger
 from src.Models.schemas import Receipt, ScanContext
 from src.config import get_settings
+
+logger = get_logger("Services.extraction_service")
 
 SYSTEM_PROMPT = """
 You are a specialized receipt and financial statement data extraction engine.
@@ -26,41 +29,62 @@ class ExtractionService:
         self.client = genai.Client(api_key=self.settings.gemini_api_key)
 
     async def extract_from_image(self, context: ScanContext) -> Receipt:
-        """Send a receipt image to Gemini 3.6 Flash Vision and return a structured Receipt.
-
-        Args:
-            context: ScanContext containing raw image bytes, MIME type, and client metadata.
-
-        Returns:
-            A validated Receipt Pydantic model with confidence_score reflecting document type validity.
-
-        Raises:
-            Exception: Propagated directly to the caller on any API or parsing failure.
-        """
-        # client.aio is the async namespace of the google-genai 2.x SDK
-        response = await self.client.aio.models.generate_content(
-            model=self.settings.gemini_vision_model,
-            contents=[
-                types.Part.from_bytes(
-                    data=context.image_bytes,
-                    mime_type=context.content_type,
-                ),
-                types.Part.from_text(text=SYSTEM_PROMPT),
-            ],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=Receipt,
-            ),
+        """Send a receipt image to Gemini 3.6 Flash Vision and return a structured Receipt."""
+        image_size = len(context.image_bytes) if context.image_bytes else 0
+        logger.debug(
+            "extract_from_image called: mime_type=%s, bytes_size=%d",
+            context.content_type,
+            image_size,
         )
-        text = response.text or ""
+        logger.info(
+            "Triggering Gemini vision model %s for receipt image extraction (%d bytes, mime=%s)",
+            self.settings.gemini_vision_model,
+            image_size,
+            context.content_type,
+        )
+        try:
+            # client.aio is the async namespace of the google-genai 2.x SDK
+            response = await self.client.aio.models.generate_content(
+                model=self.settings.gemini_vision_model,
+                contents=[
+                    types.Part.from_bytes(
+                        data=context.image_bytes,
+                        mime_type=context.content_type,
+                    ),
+                    types.Part.from_text(text=SYSTEM_PROMPT),
+                ],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=Receipt,
+                ),
+            )
+            text = response.text or ""
+            usage = getattr(response, "usage_metadata", None)
+            logger.info(
+                "Gemini vision response received. Output text len=%d, usage_metadata=%s",
+                len(text),
+                usage,
+            )
 
-        # Clean markdown wrappers if returned by Gemini
-        if text.startswith("```json"):
-            text = text[7:]
-        if text.startswith("```"):
-            text = text[3:]
-        if text.endswith("```"):
-            text = text[:-3]
-        text = text.strip()
+            # Clean markdown wrappers if returned by Gemini
+            if text.startswith("```json"):
+                text = text[7:]
+            if text.startswith("```"):
+                text = text[3:]
+            if text.endswith("```"):
+                text = text[:-3]
+            text = text.strip()
 
-        return Receipt.model_validate_json(text)
+            receipt = Receipt.model_validate_json(text)
+            logger.info(
+                "Successfully extracted receipt: merchant='%s', total=%.2f, confidence=%.2f, items_count=%d",
+                receipt.merchant_name,
+                receipt.total_amount or 0.0,
+                receipt.confidence_score or 0.0,
+                len(receipt.line_items or []),
+            )
+            return receipt
+        except Exception as e:
+            logger.error("Failed to extract receipt data from image: %s", e, exc_info=True)
+            raise
+

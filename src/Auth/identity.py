@@ -1,5 +1,5 @@
 import secrets
-from fastapi import Depends, Header, HTTPException, Request, status
+from fastapi import Depends, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel
 from supabase import AsyncClient
 from src.Infrastructure.database import get_supabase_client
@@ -404,30 +404,102 @@ async def get_scoped_identity(
 
 # ── 4. SSE STREAMING IDENTITY ──────────────────────────────────────────────────
 async def get_sse_identity(
-    request: Request,
+    x_request_type: str | None = Header(None, alias="X-Request-Type", description="Request mode: 'user' or 'guest'"),
+    x_device_name: str | None = Header(None, alias="X-Device-Name", description="Mobile hardware/variant device name identifier string"),
+    x_device_token: str | None = Header(None, alias="X-Device-Token", description="Device secret fingerprint token"),
+    x_user_name: str | None = Header(None, alias="X-User-Name", description="Authenticated username"),
+    x_user_token: str | None = Header(None, alias="X-User-Token", description="Authenticated user password token"),
+    device_name_param: str | None = Query(None, alias="device_name", description="Device name query parameter (alternative to headers for SSE EventSource)"),
+    device_token_param: str | None = Query(None, alias="device_token", description="Device token query parameter (alternative to headers for SSE EventSource)"),
+    user_name_param: str | None = Query(None, alias="username", description="Username query parameter (alternative to headers for SSE EventSource in user mode)"),
+    user_token_param: str | None = Query(None, alias="user_token", description="User token query parameter (alternative to headers for SSE EventSource in user mode)"),
+    request: Request = None,
     db: AsyncClient = Depends(get_supabase_client),
 ) -> Identity:
-    """FastAPI dependency for SSE endpoints supporting both HTTP Headers and URL Query Parameters."""
-    device_name = (request.headers.get("X-Device-Name") or request.headers.get("X-Device-ID") or request.query_params.get("device_name") or request.query_params.get("device_id") or "").strip()
-    device_token = (request.headers.get("X-Device-Token") or request.query_params.get("device_token") or "").strip()
-    username = (request.headers.get("X-User-Name") or request.headers.get("X-User-ID") or request.query_params.get("username") or request.query_params.get("user_id") or "").strip() or None
+    """FastAPI dependency for SSE endpoints supporting both User and Guest modes via HTTP Headers or URL Query Parameters."""
+    req_type = (x_request_type or "").strip().lower()
+
+    device_name = (
+        x_device_name
+        or (request.headers.get("X-Device-ID") if request else None)
+        or device_name_param
+        or (request.query_params.get("device_id") if request else None)
+        or ""
+    ).strip()
+
+    device_token = (
+        x_device_token
+        or device_token_param
+        or (request.headers.get("X-Device-Token") if request else None)
+        or (request.query_params.get("device_token") if request else None)
+        or ""
+    ).strip()
+
+    username = (
+        x_user_name
+        or user_name_param
+        or (request.headers.get("X-User-ID") if request else None)
+        or (request.query_params.get("user_id") if request else None)
+        or ""
+    ).strip()
+
+    user_token = (
+        x_user_token
+        or user_token_param
+        or (request.headers.get("X-User-Token") if request else None)
+        or (request.query_params.get("user_token") if request else None)
+        or ""
+    ).strip()
 
     logger.debug(
-        "Parsing SSE identity headers/params: X-Device-Name/X-Device-ID='%s', X-Device-Token='%s', X-User-Name/X-User-ID='%s'",
+        "Parsing SSE identity (req_type='%s'): device_name='%s', device_token='%s', username='%s', user_token='%s'",
+        req_type,
         device_name,
         "[PRESENT]" if device_token else "[EMPTY]",
         username,
+        "[PRESENT]" if user_token else "[EMPTY]",
     )
 
+    # 1. USER MODE RESOLUTION
+    if req_type == "user" or (not req_type and username and user_token and not device_name):
+        if not username or not user_token:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="User authentication required via headers (X-User-Name, X-User-Token) or query parameters (username, user_token).",
+            )
+        user_repo = UserRepository(db)
+        user = await user_repo.get_by_identifier(username)
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User account not found or invalid credentials.",
+            )
+        stored_password_hash = user.get("password", "")
+        incoming_user_hash = UserRepository.hash_password(user_token)
+        if not secrets.compare_digest(incoming_user_hash.encode("utf-8"), stored_password_hash.encode("utf-8")):
+            logger.warning("Constant-time digest comparison FAIL for SSE user token (username='%s')", username)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid user authentication token.",
+            )
+        identity = Identity(
+            user_id=user["id"],
+            username=user["username"],
+            device_id="",
+            device_name="",
+        )
+        logger.info("Identity resolved (mode=user/sse): user_id=%s, username=%s", user["id"], user["username"])
+        return identity
+
+    # 2. GUEST MODE RESOLUTION
     if not device_name or not device_token:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Device authentication required via headers (X-Device-Name, X-Device-Token) or query parameters.",
+            detail="Authentication required via user headers/query params or device headers/query params.",
         )
 
     device_repo = DeviceRepository(db)
     device = await device_repo.get_by_device_id(device_name)
-
     if not device:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -443,11 +515,15 @@ async def get_sse_identity(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid device authentication token.",
         )
-    logger.debug("Constant-time digest comparison PASS for SSE device token (device_name='%s')", device_name)
 
     db_user_id = device.get("user_id")
     canonical_name = device.get("name", device_name)
-    identity = Identity(user_id=db_user_id, username=username, device_id=device["id"], device_name=canonical_name)
+    identity = Identity(
+        user_id=db_user_id,
+        username=username if username else None,
+        device_id=device["id"],
+        device_name=canonical_name,
+    )
     resolution_mode = "user" if identity.is_authenticated else "device"
     logger.info(
         "Identity resolved (mode=%s/sse): user_id=%s, username=%s, device_id=%s, device_name=%s",

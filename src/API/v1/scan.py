@@ -85,12 +85,14 @@ async def process_receipt_worker(job_id: str, image_bytes: bytes, content_type: 
         )
 
 
-# ── SINGLE PARSE ENDPOINT ─────────────────────────────────────────────
+# ── SINGLE PARSE ENDPOINT (DEPRECATED) ─────────────────────────────────
 
 @router.post(
     "/parse",
     response_model=ScanResponse,
-    summary="Submit a single receipt image for synchronous AI parsing",
+    summary="[DEPRECATED] Submit a single receipt image for synchronous AI parsing",
+    description="[DEPRECATED] Synchronous single image parsing. Please migrate to POST /api/v1/scan/parse-many (which now supports 1 to 10 files).",
+    deprecated=True,
     dependencies=[Depends(rate_limit(lambda s: s.rate_limit_scan_per_minute))],
 )
 async def parse_receipt(
@@ -98,13 +100,12 @@ async def parse_receipt(
     identity: Identity = Depends(get_scoped_identity),
     service: ExtractionService = Depends(get_extraction_service),
 ) -> ScanResponse:
-    """Accept a multipart receipt/financial statement image upload and return AI-extracted structured data.
+    """[DEPRECATED] Accept a multipart receipt/financial statement image upload and return AI-extracted structured data.
 
-    Requires device authentication (X-Device-ID and X-Device-Token).
-    Enforces dynamic upload size ceiling, document validation confidence threshold, and rate limits.
+    Note: This endpoint is deprecated. Callers should migrate to POST /api/v1/scan/parse-many.
     """
     logger.debug(
-        "Entering parse_receipt: filename=%s, content_type=%s, identity (user_id=%s, device_id=%s)",
+        "Entering parse_receipt (deprecated): filename=%s, content_type=%s, identity (user_id=%s, device_id=%s)",
         image.filename,
         image.content_type,
         identity.user_id,
@@ -178,13 +179,13 @@ async def parse_receipt(
         )
 
 
-# ── BULK PARSE ENDPOINTS ──────────────────────────────────────────────
+# ── BULK / ASYNC PARSE ENDPOINTS ────────────────────────────────────────
 
 @router.post(
     "/parse-many",
     response_model=BulkJobCreateResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    summary="Submit bulk receipt images for async background parsing (2 to 10 files)",
+    summary="Submit receipt images for async background parsing (1 to 10 files)",
     dependencies=[Depends(rate_limit(lambda s: s.rate_limit_scan_per_minute))],
     openapi_extra={
         "requestBody": {
@@ -199,7 +200,7 @@ async def parse_receipt(
                                     "type": "string",
                                     "format": "binary",
                                 },
-                                "description": "Array of 2 to 10 receipt image files (JPEG, PNG, WEBP, etc.)",
+                                "description": "Array of 1 to 10 receipt image files (JPEG, PNG, WEBP, etc.)",
                             }
                         },
                         "required": ["files"],
@@ -213,15 +214,15 @@ async def parse_many_receipts(
     background_tasks: BackgroundTasks,
     files: list[UploadFile] = File(
         ...,
-        description="Array of 2 to 10 receipt image files (JPEG, PNG, WEBP, etc.)",
+        description="Array of 1 to 10 receipt image files (JPEG, PNG, WEBP, etc.)",
     ),
     identity: Identity = Depends(get_scoped_identity),
 ) -> BulkJobCreateResponse:
-    """Accept multipart/form-data receipt files, dispatch background processing jobs, and immediately
-    return batch_id and job_id mappings.
+    """Accept multipart/form-data receipt files (1 to 10 images), dispatch background processing jobs,
+    and immediately return batch_id and job_id mappings.
 
-    Requires device authentication (X-Device-ID and X-Device-Token).
-    Enforces a strict batch size of 2 to 10 images per request and per-file size ceiling.
+    Requires scoped authentication (X-Request-Type: guest or user).
+    Enforces a strict batch size of 1 to 10 images per request and per-file size ceiling.
     """
     logger.debug(
         "Entering parse_many_receipts: file_count=%d, identity (user_id=%s, device_id=%s)",
@@ -236,12 +237,12 @@ async def parse_many_receipts(
             detail="Redis service unavailable. Please check Redis connection.",
         )
 
-    # Enforce file count bounds: min 2, max 10
-    if len(files) < 2 or len(files) > 10:
-        logger.warning("Bulk receipt parsing invalid file count: %d (must be 2-10)", len(files))
+    # Enforce file count bounds: min 1, max 10
+    if len(files) < 1 or len(files) > 10:
+        logger.warning("Bulk receipt parsing invalid file count: %d (must be 1-10)", len(files))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Bulk receipt parsing requires between 2 and 10 image files. Received {len(files)} files.",
+            detail=f"Bulk receipt parsing requires between 1 and 10 image files. Received {len(files)} files.",
         )
 
     # Enforce image size ceiling per file
@@ -296,6 +297,18 @@ async def parse_many_receipts(
 
         await redis_client.expire(batch_key, settings.redis_job_ttl_seconds)
 
+        # Store batch ownership metadata for access control
+        batch_meta_key = f"batch:{batch_id}:meta"
+        await redis_client.hset(
+            batch_meta_key,
+            mapping={
+                "device_id": identity.device_id or "",
+                "user_id": identity.user_id or "",
+                "request_type": "user" if identity.is_authenticated else "guest",
+            },
+        )
+        await redis_client.expire(batch_meta_key, settings.redis_job_ttl_seconds)
+
         logger.info(
             "Bulk parse batch created: batch_id=%s, total_jobs=%d",
             batch_id,
@@ -322,10 +335,18 @@ async def parse_many_receipts(
     "/parse-many/{batch_id}",
     response_model=BulkBatchStatusResponse,
     summary="Get bulk batch parsing status and extracted receipt results",
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_scan_per_minute))],
 )
-async def get_parse_many_batch_status(batch_id: str) -> BulkBatchStatusResponse:
-    """Retrieve status and extracted payload data for all jobs under a batch_id."""
-    logger.debug("Entering get_parse_many_batch_status: batch_id=%s", batch_id)
+async def get_parse_many_batch_status(
+    batch_id: str,
+    identity: Identity = Depends(get_scoped_identity),
+) -> BulkBatchStatusResponse:
+    """Retrieve status and extracted payload data for all jobs under a batch_id.
+
+    Requires scoped authentication (X-Request-Type: guest or user).
+    Enforces batch ownership validation (returns HTTP 403 if batch belongs to another caller).
+    """
+    logger.debug("Entering get_parse_many_batch_status: batch_id=%s, identity (user_id=%s, device_id=%s)", batch_id, identity.user_id, identity.device_id)
     if not redis_client:
         logger.error("Redis service unavailable when querying batch status for %s", batch_id)
         raise HTTPException(
@@ -334,6 +355,26 @@ async def get_parse_many_batch_status(batch_id: str) -> BulkBatchStatusResponse:
         )
 
     try:
+        # Enforce batch ownership check
+        meta_hash = await redis_client.hgetall(f"batch:{batch_id}:meta")
+        if meta_hash:
+            owner_device = meta_hash.get("device_id")
+            owner_user = meta_hash.get("user_id")
+            if identity.is_authenticated:
+                if owner_user and identity.user_id != owner_user:
+                    logger.warning("Access denied to batch %s for user %s (owner: %s)", batch_id, identity.user_id, owner_user)
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Access denied: batch belongs to another user.",
+                    )
+            else:
+                if owner_device and identity.device_id != owner_device:
+                    logger.warning("Access denied to batch %s for device %s (owner: %s)", batch_id, identity.device_id, owner_device)
+                    raise HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN,
+                        detail="Access denied: batch belongs to another device.",
+                    )
+
         batch_key = f"batch:{batch_id}"
         job_ids = await redis_client.smembers(batch_key)
 
@@ -451,6 +492,20 @@ async def stream_parse_many_batch(
             yield f"event: error\ndata: {json.dumps({'error': 'Batch ID not found or expired'})}\n\n"
             return
 
+        # Enforce batch ownership check
+        meta_hash = await redis_client.hgetall(f"batch:{batch_id}:meta")
+        if meta_hash:
+            owner_device = meta_hash.get("device_id")
+            owner_user = meta_hash.get("user_id")
+            is_owner = (
+                (identity.is_authenticated and owner_user and identity.user_id == owner_user)
+                or (owner_device and identity.device_id == owner_device)
+            )
+            if not is_owner:
+                logger.warning("SSE access denied to batch %s for device %s", batch_id, identity.device_id)
+                yield f"event: error\ndata: {json.dumps({'error': 'Access denied: batch belongs to another identity'})}\n\n"
+                return
+
         elapsed = 0.0
         terminal = {"COMPLETED", "FAILED"}
 
@@ -462,7 +517,7 @@ async def stream_parse_many_batch(
 
             if all(s in terminal for s in statuses):
                 # Fetch complete batch data object and send directly in SSE data field
-                batch_data = await get_parse_many_batch_status(batch_id)
+                batch_data = await get_parse_many_batch_status(batch_id, identity=identity)
                 logger.info("Batch %s complete. Emitting batch_complete SSE event with full JSON payload.", batch_id)
                 yield f"event: batch_complete\ndata: {json.dumps(batch_data)}\n\n"
                 return

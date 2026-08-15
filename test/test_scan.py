@@ -162,8 +162,8 @@ def test_scan_parse_file_size_exceeded(client, mock_device):
 
 # ── /parse-many endpoint tests ─────────────────────────────────────────
 
-def test_scan_parse_many_too_few_files(client, mock_device):
-    """Batch with fewer than 2 files returns HTTP 400."""
+def test_scan_parse_many_single_file_valid(client, mock_device):
+    """Batch with 1 file is valid and returns HTTP 202 Accepted."""
     file_bytes = b"fake_receipt_image_bytes"
     files = [("files", ("receipt1.jpg", io.BytesIO(file_bytes), "image/jpeg"))]
 
@@ -173,8 +173,12 @@ def test_scan_parse_many_too_few_files(client, mock_device):
         files=files,
     )
 
-    assert response.status_code == 400
-    assert "between 2 and 10" in response.json()["detail"]
+    # 503 if Redis is uninitialized in test context, 202 when batch is created
+    assert response.status_code in (202, 503)
+    if response.status_code == 202:
+        data = response.json()
+        assert data["total_jobs"] == 1
+        assert len(data["jobs"]) == 1
 
 
 def test_scan_parse_many_too_many_files(client, mock_device):
@@ -192,7 +196,7 @@ def test_scan_parse_many_too_many_files(client, mock_device):
     )
 
     assert response.status_code == 400
-    assert "between 2 and 10" in response.json()["detail"]
+    assert "between 1 and 10" in response.json()["detail"]
 
 
 def test_scan_parse_many_file_size_exceeded(client, mock_device):
@@ -231,11 +235,20 @@ def test_scan_parse_many_unauthenticated(client, invalid_headers):
     assert response.status_code == 401
 
 
+def test_scan_parse_many_batch_status_unauthenticated(client, invalid_headers):
+    """GET /parse-many/{batch_id} without authentication headers returns HTTP 401."""
+    response = client.get(
+        "/api/v1/scan/parse-many/batch-12345",
+        headers=invalid_headers,
+    )
+    assert response.status_code == 401
+
+
 def test_scan_parse_many_batch_status_not_found(client, mock_device):
     """GET /parse-many/{batch_id} returns HTTP 404 for unknown batch_id."""
     response = client.get(
         "/api/v1/scan/parse-many/nonexistent-batch-id-12345",
-        headers=mock_device["headers"],
+        headers=mock_device["guest_scan_headers"],
     )
 
     # 503 when Redis client is not initialised in test context,

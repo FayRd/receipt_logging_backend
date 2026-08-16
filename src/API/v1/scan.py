@@ -508,12 +508,30 @@ async def stream_parse_many_batch(
 
         elapsed = 0.0
         terminal = {"COMPLETED", "FAILED"}
+        last_reported_completed = 0
 
         while elapsed < timeout:
             statuses = []
             for job_id in job_ids:
                 job_hash = await redis_client.hgetall(f"job:{job_id}")
                 statuses.append(job_hash.get("status", "PENDING"))
+
+            completed_count = sum(1 for s in statuses if s in terminal)
+
+            if completed_count > last_reported_completed and not all(s in terminal for s in statuses):
+                last_reported_completed = completed_count
+                progress_payload = {
+                    "batch_id": batch_id,
+                    "total_jobs": len(job_ids),
+                    "completed_jobs": completed_count,
+                }
+                logger.info(
+                    "Batch %s progress: %d/%d jobs completed. Emitting progress SSE event.",
+                    batch_id,
+                    completed_count,
+                    len(job_ids),
+                )
+                yield f"event: progress\ndata: {json.dumps(progress_payload)}\n\n"
 
             if all(s in terminal for s in statuses):
                 # Fetch complete batch data object and send directly in SSE data field

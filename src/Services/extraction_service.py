@@ -18,8 +18,11 @@ Document Validation & Confidence Scoring Rules:
 3. raw_text: Transcribe every visible character from top to bottom.
 4. category: Infer from context. Must be one of: Dining, Groceries, Transport, Utilities, Shopping, Entertainment, Health, Supplies, Other.
 5. currency: ISO 4217 code (e.g. USD, SGD, MYR, EUR, GBP). Default to USD if unclear.
-6. Set missing optional fields to null.
-7. Output ONLY valid JSON matching the schema. No prose, no markdown wrappers.
+6. line_items: Extract all purchased products, items, and services. Also extract:
+   - Surcharges (e.g. Service Charge, GST/VAT/Tax, Delivery Fee, Tips, Surcharge) as separate line items with positive unit_price and total_price values.
+   - Discounts (e.g. Vouchers, Coupons, Member Discounts, Promo Codes, Special Reductions, Trade-ins, Deductions) as separate line items with NEGATIVE unit_price and total_price values (e.g. -2.50).
+7. Set missing optional fields to null.
+8. Output ONLY valid JSON matching the schema. No prose, no markdown wrappers.
 """.strip()
 
 

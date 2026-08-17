@@ -97,6 +97,15 @@ class ReceiptBatchCreateRequest(BaseModel):
     receipts: list[Receipt] = Field(..., min_length=1, max_length=100)
 
 
+class ReceiptUpdateRequest(BaseModel):
+    """Request body for updating an existing receipt record via PATCH.
+
+    Identity (user_id) is resolved server-side from session headers.
+    Only the receipt payload is updated; ownership metadata is immutable.
+    """
+    receipt: Receipt
+
+
 class HealthResponse(BaseModel):
     status: str
     environment: str

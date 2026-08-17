@@ -8,6 +8,7 @@ from src.Models.schemas import (
     ReceiptRecord,
     ReceiptCreateRequest,
     ReceiptBatchCreateRequest,
+    ReceiptUpdateRequest,
 )
 from src.Models.Receipts.receipt_repository import ReceiptRepository
 
@@ -133,6 +134,45 @@ async def create_receipts_batch(
         identity.user_id,
     )
     return records
+
+
+# ── UPDATE receipt ────────────────────────────────────────────────────────────
+@router.patch(
+    "/{receipt_id}",
+    response_model=ReceiptRecord,
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_crud_per_minute))],
+)
+async def update_receipt(
+    receipt_id: str,
+    body: ReceiptUpdateRequest,
+    identity: Identity = Depends(get_user_identity),
+    repo: ReceiptRepository = Depends(get_repo),
+):
+    """Update the receipt payload for a record owned by the caller's authenticated user identity.
+
+    Only the `receipt` JSON column is updated — ownership metadata is immutable.
+    Requires X-User-Name and X-User-Token headers.
+    """
+    logger.debug(
+        "Entering update_receipt: receipt_id=%s, merchant=%s, identity (user_id=%s)",
+        receipt_id,
+        body.receipt.merchant_name,
+        identity.user_id,
+    )
+    updated = await repo.update(receipt_id, identity, body.receipt)
+    if not updated:
+        logger.warning(
+            "Update receipt failed — not found or not owned: receipt_id=%s, user_id=%s",
+            receipt_id,
+            identity.user_id,
+        )
+        raise HTTPException(status_code=404, detail="Receipt not found or access denied")
+    logger.info(
+        "Receipt updated successfully: receipt_id=%s, user_id=%s",
+        receipt_id,
+        identity.user_id,
+    )
+    return updated
 
 
 # ── SOFT DELETE receipt ───────────────────────────────────────────────────────

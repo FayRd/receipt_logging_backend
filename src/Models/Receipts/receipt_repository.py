@@ -187,6 +187,51 @@ class ReceiptRepository:
             )
             raise
 
+    # ── UPDATE ────────────────────────────────────────────────────────────────
+
+    async def update(self, receipt_id: str, identity: Identity, receipt: Receipt) -> dict | None:
+        """Update the receipt payload for a row owned by the caller's identity.
+
+        Returns the updated row dict or None if no row was found/matched.
+        """
+        start_time = time.perf_counter()
+        logger.debug(
+            "UPDATE receipt: receipt_id=%s, user_id=%s, device_id=%s, merchant=%s",
+            receipt_id,
+            identity.user_id,
+            identity.device_id,
+            receipt.merchant_name,
+        )
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            query = (
+                self.db.table(self.TABLE)
+                .update({"receipt": receipt.model_dump(mode="json"), "updated_at": now})
+                .eq("id", receipt_id)
+                .is_("deleted_at", "null")
+            )
+            query = self._apply_identity_filter(query, identity)
+            response = await query.execute()
+            updated_row = response.data[0] if (response and response.data) else None
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.info(
+                "UPDATE receipt finished: receipt_id=%s, found=%s in %.2fms",
+                receipt_id,
+                updated_row is not None,
+                duration_ms,
+            )
+            return updated_row
+        except Exception as e:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.error(
+                "Database error in UPDATE receipt receipt_id=%s after %.2fms: %s",
+                receipt_id,
+                duration_ms,
+                e,
+                exc_info=True,
+            )
+            raise
+
     # ── SOFT DELETE ───────────────────────────────────────────────────────────
 
     async def soft_delete(self, receipt_id: str, identity: Identity) -> bool:

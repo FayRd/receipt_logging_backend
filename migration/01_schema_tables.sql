@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS users (
     country_code TEXT,
     mobile_number TEXT,
     avatar_image_path TEXT,
+    custom_categories JSONB DEFAULT '[]'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     deleted_at TIMESTAMPTZ

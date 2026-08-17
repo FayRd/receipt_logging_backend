@@ -168,14 +168,28 @@ class DataMigrationService:
         elif chat_messages and not conv_id_map:
             logger.warning("chat_messages present (%d) but no conversations were mapped; skipping message migration", len(chat_messages))
 
+        # ── 4. Custom Categories ──────────────────────────────────────────────
+        custom_categories = migrate_data.get("custom_categories", []) or []
+        if custom_categories:
+            try:
+                user_res = await db.table("users").select("custom_categories").eq("id", user_id).maybe_single().execute()
+                current_cats = user_res.data.get("custom_categories") if user_res and user_res.data else None
+                if not current_cats:
+                    await db.table("users").update({"custom_categories": custom_categories}).eq("id", user_id).execute()
+                    migrated["custom_categories"] = len(custom_categories)
+                    logger.info("Migrated %d custom_categories for user_id=%s", len(custom_categories), user_id)
+            except Exception as exc:
+                logger.error("DataMigrationService: custom_categories update failed for user_id=%s: %s", user_id, exc, exc_info=True)
+
         logger.info(
             "DataMigrationService: completed migration for user_id=%s device_name=%s "
-            "— receipts=%d, conversations=%d, chat_messages=%d",
+            "— receipts=%d, conversations=%d, chat_messages=%d, custom_categories=%d",
             user_id,
             device_name,
             migrated["receipts"],
             migrated["conversations"],
             migrated["chat_messages"],
+            migrated.get("custom_categories", 0),
         )
         return migrated
 

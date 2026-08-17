@@ -114,6 +114,14 @@ class HealthResponse(BaseModel):
 
 # ── USER SCHEMAS ──────────────────────────────────────────────────────────────
 
+class CustomCategorySchema(BaseModel):
+    name: str = Field(..., min_length=1, max_length=50)
+    color_value: int = Field(..., alias="colorValue")
+    icon_code_point: int = Field(..., alias="iconCodePoint")
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
 class UserCreateRequest(BaseModel):
     """Request body for new user registration."""
     username: str = Field(..., min_length=3, max_length=50)
@@ -122,6 +130,7 @@ class UserCreateRequest(BaseModel):
     country_code: str | None = Field(default=None, max_length=10, description="E.164 country dialling code, e.g. +60.")
     mobile_number: str | None = Field(default=None, max_length=20, description="Mobile number without country code.")
     avatar_image_path: str | None = None
+    custom_categories: list[CustomCategorySchema] | None = Field(default=None, max_length=8, description="Custom user categories (max 8)")
 
 
 class UserLoginRequest(BaseModel):
@@ -138,6 +147,7 @@ class UserRecord(BaseModel):
     country_code: str | None = None
     mobile_number: str | None = None
     avatar_image_path: str | None = None
+    custom_categories: list[CustomCategorySchema] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime | None = None
     deleted_at: datetime | None = None
@@ -152,6 +162,7 @@ class UserUpdateRequest(BaseModel):
     country_code: str | None = Field(default=None, max_length=10)
     mobile_number: str | None = Field(default=None, max_length=20)
     avatar_image_path: str | None = None
+    custom_categories: list[CustomCategorySchema] | None = Field(default=None, max_length=8)
 
 
 class UserLoginResponse(BaseModel):
@@ -278,6 +289,7 @@ class GuestDataMigrationPayload(BaseModel):
     receipts: list[dict] = Field(default_factory=list, max_length=200)
     conversations: list[dict] = Field(default_factory=list, max_length=200)
     chat_messages: list[dict] = Field(default_factory=list, max_length=500)
+    custom_categories: list[CustomCategorySchema] = Field(default_factory=list, max_length=8)
 
 
 class DeviceLinkRequest(BaseModel):

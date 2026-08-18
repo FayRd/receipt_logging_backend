@@ -87,6 +87,13 @@ async def get_receipt(
     status_code=201,
     dependencies=[Depends(rate_limit(lambda s: s.rate_limit_crud_per_minute))],
 )
+@router.post(
+    "/",
+    response_model=ReceiptRecord,
+    status_code=201,
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_crud_per_minute))],
+    include_in_schema=False,
+)
 async def create_receipt(
     body: ReceiptCreateRequest,
     identity: Identity = Depends(get_user_identity),
@@ -102,8 +109,8 @@ async def create_receipt(
     record = await repo.create(identity, body.receipt)
     logger.info(
         "Receipt created successfully: receipt_id=%s, merchant=%s, user_id=%s",
-        record.id,
-        record.merchant_name,
+        record.get("id"),
+        body.receipt.merchant_name,
         identity.user_id,
     )
     return record
@@ -115,6 +122,13 @@ async def create_receipt(
     response_model=list[ReceiptRecord],
     status_code=201,
     dependencies=[Depends(rate_limit(lambda s: s.rate_limit_crud_per_minute))],
+)
+@router.post(
+    "/batch",
+    response_model=list[ReceiptRecord],
+    status_code=201,
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_crud_per_minute))],
+    include_in_schema=False,
 )
 async def create_receipts_batch(
     body: ReceiptBatchCreateRequest,

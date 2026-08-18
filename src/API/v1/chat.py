@@ -10,6 +10,7 @@ from src.Models.schemas import (
     ChatMessageInput,
     ChatMessageRecord,
     ConversationCreateRequest,
+    ConversationUpdateRequest,
     ConversationRecord,
     ChatQueryRequest,
     ChatQueryResponse,
@@ -67,7 +68,7 @@ async def create_conversation(
             detail=f"Maximum limit of {settings.max_conversations_per_identity} conversations reached for this user identity.",
         )
     data = await repo.create_conversation(identity, body.title)
-    logger.info("Conversation created successfully: conv_id=%s, title=%s, user_id=%s", data.id, data.title, identity.user_id)
+    logger.info("Conversation created successfully: conv_id=%s, title=%s, user_id=%s", data.get("id"), data.get("title"), identity.user_id)
     return data
 
 
@@ -176,50 +177,81 @@ async def send_chat_query(
         identity.user_id,
         identity.device_id,
     )
-    # ── Cloud Store Mode ────────────────────────────────────────────────────────
-    if body.conversation_id:
-        # Cloud store requires user authentication (not guest)
-        if not identity.is_authenticated:
-            logger.warning("Chat query failed: Cloud store mode requires user authentication")
-            raise HTTPException(
-                status_code=401,
-                detail="Cloud store mode requires user authentication (X-Request-Type: user).",
+    # ── Cloud Store Mode (Authenticated User) ──────────────────────────────────
+    if identity.is_authenticated:
+        if body.conversation_id:
+            conv = await repo.get_conversation(body.conversation_id, identity)
+            if not conv:
+                logger.warning(
+                    "Chat query failed: Conversation %s not found for user_id=%s",
+                    body.conversation_id,
+                    identity.user_id,
+                )
+                raise HTTPException(status_code=404, detail="Conversation not found")
+            conv_id = body.conversation_id
+            # Fetch recent message history for rolling context window
+            history_messages, _ = await repo.get_messages(
+                conv_id,
+                limit=service.settings.rag_history_messages_limit,
+                offset=0,
             )
-        conv = await repo.get_conversation(body.conversation_id, identity)
-        if not conv:
-            logger.warning("Chat query failed: Conversation %s not found for user_id=%s", body.conversation_id, identity.user_id)
-            raise HTTPException(status_code=404, detail="Conversation not found")
+        else:
+            conv_id = None
+            history_messages = []
 
-        # Fetch recent message history for rolling context window
-        history_messages, _ = await repo.get_messages(body.conversation_id, limit=20, offset=0)
+        # Generate Gemini response with identity-scoped receipt context FIRST
+        try:
+            ai_response_text = await service.generate_response(
+                identity, body.message, history_messages
+            )
+        except Exception as e:
+            logger.error("Failed to generate AI response in cloud mode: %s", e, exc_info=True)
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to generate AI response. Please try again.",
+            )
 
-        # Generate Gemini response with identity-scoped receipt context
-        ai_response_text = await service.generate_response(identity, body.message, history_messages)
+        # Only after Gemini succeeds, create new conversation if first turn
+        if not conv_id:
+            conv = await repo.create_conversation(identity, title="New Conversation")
+            conv_id = conv["id"]
+            logger.info(
+                "Auto-created new conversation %s for user_id=%s after successful AI generation",
+                conv_id,
+                identity.user_id,
+            )
 
         # Persist both messages to Supabase DB
-        user_msg = await repo.add_message(body.conversation_id, "user", body.message)
-        ai_msg = await repo.add_message(body.conversation_id, "assistant", ai_response_text)
+        user_msg = await repo.add_message(conv_id, "user", body.message)
+        ai_msg = await repo.add_message(conv_id, "assistant", ai_response_text)
 
         logger.info(
             "Chat query processed (Cloud Mode): conv_id=%s, user_msg_id=%s, assistant_msg_id=%s",
-            body.conversation_id,
-            user_msg.id,
-            ai_msg.id,
+            conv_id,
+            user_msg.get("id"),
+            ai_msg.get("id"),
         )
 
         return ChatQueryResponse(
-            conversation_id=body.conversation_id,
+            conversation_id=conv_id,
             user_message=user_msg,
             assistant_message=ai_msg,
         )
 
-    # ── Local Store Mode (Guest or User Local) ──────────────────────────────────
-    ai_response_text = await service.generate_response_local(
-        identity=identity,
-        user_message=body.message,
-        conversation_history=body.conversation_history,
-        recent_receipts=body.recent_receipts,
-    )
+    # ── Local Store Mode (Guest) ────────────────────────────────────────────────
+    try:
+        ai_response_text = await service.generate_response_local(
+            identity=identity,
+            user_message=body.message,
+            conversation_history=body.conversation_history,
+            recent_receipts=body.receipts,
+        )
+    except Exception as e:
+        logger.error("Failed to generate AI response in local mode: %s", e, exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to generate AI response. Please try again.",
+        )
 
     now_iso = datetime.now(timezone.utc)
     user_msg = ChatMessageRecord(
@@ -250,7 +282,46 @@ async def send_chat_query(
     )
 
 
-# ── 5. DELETE /chat/{conversation_id} ─────────────────────────────────────────
+# ── 5. PATCH /chat/{conversation_id} ─────────────────────────────────────────
+@router.patch(
+    "/{conversation_id}",
+    response_model=ConversationRecord,
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_crud_per_minute))],
+)
+async def update_conversation(
+    conversation_id: str,
+    body: ConversationUpdateRequest,
+    identity: Identity = Depends(get_user_identity),
+    repo: ConversationRepository = Depends(get_repo),
+):
+    """Update conversation title by UUID. Requires X-User-Name and X-User-Token headers."""
+    logger.debug(
+        "Entering update_conversation: conversation_id=%s, title=%s, identity (user_id=%s)",
+        conversation_id,
+        body.title,
+        identity.user_id,
+    )
+    updated = await repo.update_title(conversation_id, identity, body.title)
+    if not updated:
+        logger.warning(
+            "Update conversation failed: Conv_id %s not found or already deleted for user_id=%s",
+            conversation_id,
+            identity.user_id,
+        )
+        raise HTTPException(
+            status_code=404,
+            detail="Conversation not found or access denied.",
+        )
+    logger.info(
+        "Conversation title updated successfully: conv_id=%s, new_title=%s, user_id=%s",
+        conversation_id,
+        updated.get("title"),
+        identity.user_id,
+    )
+    return updated
+
+
+# ── 6. DELETE /chat/{conversation_id} ─────────────────────────────────────────
 @router.delete(
     "/{conversation_id}",
     status_code=200,

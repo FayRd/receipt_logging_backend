@@ -30,8 +30,8 @@ class Settings(BaseSettings):
 
     # AI Chat Assistant & RAG
     gemini_chat_model: str = "gemini-3.6-flash"    # Chat model name
-    rag_recent_receipts_limit: int = 30           # Receipts context window
-    rag_history_messages_limit: int = 10          # Message turns context window
+    rag_recent_receipts_limit: int = 100          # Receipts context window (matches guest limit)
+    rag_history_messages_limit: int = 50          # Message turns context window (matches guest limit)
     max_conversations_per_identity: int = 10      # Active conversation hard cap
 
     # Rate Limiting Configuration

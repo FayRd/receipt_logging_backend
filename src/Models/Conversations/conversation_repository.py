@@ -159,6 +159,48 @@ class ConversationRepository:
             )
             raise
 
+    async def update_title(
+        self, conversation_id: str, identity: Identity, title: str
+    ) -> dict | None:
+        """Update title of a conversation owned by identity. Returns updated row dict or None."""
+        start_time = time.perf_counter()
+        clean_title = title.strip()
+        logger.debug(
+            "UPDATE conversation update_title: conversation_id=%s, title='%s', user_id=%s",
+            conversation_id,
+            clean_title,
+            identity.user_id,
+        )
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            q = (
+                self.db.table(self.CONVERSATIONS_TABLE)
+                .update({"title": clean_title, "updated_at": now})
+                .eq("id", conversation_id)
+                .is_("deleted_at", "null")
+            )
+            q = self._apply_identity_filter(q, identity)
+            res = await q.execute()
+            result = res.data[0] if res and res.data else None
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.info(
+                "UPDATE conversation update_title finished: conversation_id=%s, found=%s in %.2fms",
+                conversation_id,
+                result is not None,
+                duration_ms,
+            )
+            return result
+        except Exception as e:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.error(
+                "Database error in UPDATE conversation update_title conversation_id=%s after %.2fms: %s",
+                conversation_id,
+                duration_ms,
+                e,
+                exc_info=True,
+            )
+            raise
+
     # ── CHAT MESSAGES ─────────────────────────────────────────────────────────
 
     async def get_messages(

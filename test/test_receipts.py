@@ -25,6 +25,12 @@ def test_create_receipt(client, mock_user_session):
     assert response.status_code == 201
     assert "id" in response.json()
 
+def test_create_receipt_slash_alias(client, mock_user_session):
+    payload = {"receipt": generate_receipt_payload()}
+    response = client.post("/api/v1/receipts/", json=payload, headers=mock_user_session["headers"])
+    assert response.status_code == 201
+    assert "id" in response.json()
+
 def test_create_receipt_batch(client, mock_user_session):
     payload = {
         "receipts": [

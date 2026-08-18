@@ -1,6 +1,6 @@
 import json
 from dataclasses import dataclass
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, AliasChoices
 from datetime import datetime
 
 
@@ -24,7 +24,7 @@ class Receipt(BaseModel):
     currency: str = "USD"
     category: str | None = None
     date: str | datetime
-    raw_text: str
+    raw_text: str = ""
     confidence_score: float = 0.0
     notes: str | None = None
 
@@ -200,6 +200,11 @@ class ConversationCreateRequest(BaseModel):
     title: str | None = None
 
 
+class ConversationUpdateRequest(BaseModel):
+    """Request body for updating conversation title."""
+    title: str = Field(..., min_length=1, max_length=255, description="New conversation title.")
+
+
 class ConversationRecord(BaseModel):
     id: str
     user_id: str | None = None
@@ -240,20 +245,21 @@ class ChatQueryRequest(BaseModel):
     Storage mode is controlled by conversation_id:
     - Cloud Store (User): Supply a valid `conversation_id` UUID — messages are persisted to Supabase DB.
     - Local Store (User or Guest): Omit or pass null for `conversation_id` — no Supabase DB writes.
-      Client must supply `conversation_history` (prior message turns) and optionally `recent_receipts`
+      Client must supply `conversation_history` (prior message turns) and optionally `receipts`
       (local Isar DB receipts) for AI context.
     """
     conversation_id: str | None = Field(default=None, description="Supabase conversation UUID. Omit/null for local-only storage (Guest or User local mode).")
     message: str = Field(..., min_length=1, max_length=4000)
     conversation_history: list[ChatMessageInput] = Field(
         default_factory=list,
-        max_length=20,
-        description="Client-managed local conversation history (max 20 turns). Used only in local/guest mode.",
-    )
-    recent_receipts: list[ReceiptContextItem] = Field(
-        default_factory=list,
         max_length=50,
-        description="Client-supplied local receipts for AI spending analysis RAG context. Used only in local/guest mode.",
+        description="Client-managed local conversation history (max 50 turns). Used only in local/guest mode.",
+    )
+    receipts: list[Receipt] = Field(
+        default_factory=list,
+        max_length=100,
+        validation_alias=AliasChoices('receipts', 'recent_receipts'),
+        description="Client-supplied full receipts for AI spending analysis RAG context. Used only in local/guest mode.",
     )
 
 

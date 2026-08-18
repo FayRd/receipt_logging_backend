@@ -113,27 +113,20 @@ def test_chat_query_unowned(client, mock_user_session):
     assert res.status_code == 404
 
 
-@patch("src.Services.chat_service.ChatService.generate_response_local", new_callable=AsyncMock)
-def test_chat_query_local_mode_user(mock_gen, client, mock_user_session):
-    """User local mode: conversation_id null, uses client-supplied conversation_history."""
-    mock_gen.return_value = "Local AI response."
+@patch("src.Services.chat_service.ChatService.generate_response", new_callable=AsyncMock)
+def test_chat_query_user_first_turn_autocreate(mock_gen, client, mock_user_session):
+    """User Mode: conversation_id omitted on first turn auto-creates conversation in Supabase."""
+    mock_gen.return_value = "Cloud AI response on first turn."
 
     res = client.post("/api/v1/chat/query", json={
         "message": "How much did I spend last month?",
-        "conversation_history": [
-            {"role": "user", "content": "Hi there"},
-            {"role": "assistant", "content": "Hello! How can I help you?"},
-        ],
-        "recent_receipts": [
-            {"merchant_name": "Starbucks", "total_amount": 7.50, "category": "Food & Drink", "date": "2026-07-01"},
-        ]
     }, headers=mock_user_session["user_scan_headers"])
 
     assert res.status_code == 200
     data = res.json()
-    assert data["conversation_id"] is None  # Local mode — no Supabase DB write
-    assert data["user_message"]["id"] is not None  # Synthetic UUID returned
-    assert data["assistant_message"]["content"] == "Local AI response."
+    assert data["conversation_id"] is not None  # Auto-created conversation UUID
+    assert data["user_message"]["id"] is not None
+    assert data["assistant_message"]["content"] == "Cloud AI response on first turn."
     assert mock_gen.called
 
 
@@ -209,6 +202,64 @@ def test_delete_chat_already_deleted(client, mock_user_session):
     
     del_res_2 = client.delete(f"/api/v1/chat/{conv_id}", headers=mock_user_session["headers"])
     assert del_res_2.status_code == 404
+
+
+def test_update_chat_title_success(client, mock_user_session):
+    create_res = client.post("/api/v1/chat/create", headers=mock_user_session["headers"])
+    conv_id = create_res.json()["id"]
+
+    patch_res = client.patch(
+        f"/api/v1/chat/{conv_id}",
+        json={"title": "Updated Title via PATCH"},
+        headers=mock_user_session["headers"],
+    )
+    assert patch_res.status_code == 200
+    data = patch_res.json()
+    assert data["id"] == conv_id
+    assert data["title"] == "Updated Title via PATCH"
+
+
+def test_update_chat_title_unowned(client, mock_user_session):
+    create_res = client.post("/api/v1/chat/create", headers=mock_user_session["headers"])
+    conv_id = create_res.json()["id"]
+
+    user_b_name = f"user_b_{uuid.uuid4().hex[:6]}"
+    password = "password_123"
+    create_b = client.post("/api/v1/user/create", json={
+        "username": user_b_name,
+        "email": f"{user_b_name}@test.com",
+        "password": password
+    })
+    assert create_b.status_code == 201
+    headers_b = {
+        "X-User-Name": user_b_name,
+        "X-User-Token": password
+    }
+
+    patch_res = client.patch(
+        f"/api/v1/chat/{conv_id}",
+        json={"title": "Malicious Title Edit"},
+        headers=headers_b,
+    )
+    assert patch_res.status_code == 404
+
+    client.delete("/api/v1/user/me", headers=headers_b)
+
+
+@patch("src.Services.chat_service.ChatService.generate_response", new_callable=AsyncMock)
+def test_chat_query_failure_does_not_create_conversation(mock_gen, client, mock_user_session):
+    """If Gemini AI fails on first turn, no conversation is created in Supabase."""
+    mock_gen.side_effect = RuntimeError("Gemini API Error")
+
+    res = client.post("/api/v1/chat/query", json={
+        "message": "This query will fail in Gemini",
+    }, headers=mock_user_session["user_scan_headers"])
+
+    assert res.status_code == 500
+
+    # Verify conversation was not created
+    list_res = client.get("/api/v1/chat/list", headers=mock_user_session["headers"])
+    assert list_res.status_code == 200
 
 
 if __name__ == "__main__":

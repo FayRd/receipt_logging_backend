@@ -26,13 +26,28 @@ class Settings(BaseSettings):
     # Scanning & AI Vision Extraction
     max_image_size_bytes: int = 10 * 1024 * 1024  # 10 MB file ceiling
     confidence_threshold: float = 0.8             # Validation confidence threshold
-    gemini_vision_model: str = "gemini-3.6-flash" # Vision model name
+    gemini_vision_model: str = "gemini-3.6-flash" # Gemini vision model name
 
     # AI Chat Assistant & RAG
-    gemini_chat_model: str = "gemini-3.6-flash"    # Chat model name
+    gemini_chat_model: str = "gemini-3.6-flash"    # Gemini chat model name
     rag_recent_receipts_limit: int = 100          # Receipts context window (matches guest limit)
     rag_history_messages_limit: int = 50          # Message turns context window (matches guest limit)
     max_conversations_per_identity: int = 10      # Active conversation hard cap
+
+    # AI Provider Selection
+    # Set AI_PROVIDER to "gemini" (default) or "openrouter".
+    # Fallback: if AI_PROVIDER is unset but OPENROUTER_API_KEY is provided while GEMINI_API_KEY is
+    # empty, OpenRouter is automatically activated.
+    ai_provider: str = "gemini"
+
+    # OpenRouter Configuration
+    # Obtain your API key at https://openrouter.ai/keys
+    # Vision-capable models: "google/gemini-2.5-flash", "openai/gpt-4o", "anthropic/claude-3.5-haiku"
+    # Chat-only models:      "openai/gpt-4o-mini", "meta-llama/llama-3.3-70b-instruct"
+    openrouter_api_key: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_vision_model: str = "google/gemini-2.5-flash"
+    openrouter_chat_model: str = "google/gemini-2.5-flash"
 
     # Rate Limiting Configuration
     rate_limit_enabled: bool = True
@@ -52,6 +67,23 @@ class Settings(BaseSettings):
     log_file_path: str = "app.log"
     log_level: str = "DEBUG"
     enable_console_logging: bool = True
+
+    @property
+    def effective_ai_provider(self) -> str:
+        """Return the resolved AI provider ("gemini" or "openrouter").
+
+        Resolution order:
+        1. Explicit AI_PROVIDER env var ("gemini" or "openrouter").
+        2. Auto-detect: if AI_PROVIDER is unset/empty and only OPENROUTER_API_KEY is populated,
+           defaults to "openrouter".
+        3. Otherwise defaults to "gemini".
+        """
+        prov = (self.ai_provider or "").lower().strip()
+        if prov == "openrouter":
+            return "openrouter"
+        if not self.gemini_api_key and self.openrouter_api_key:
+            return "openrouter"
+        return "gemini"
 
 
 @lru_cache

@@ -2,7 +2,7 @@
 import io
 from datetime import datetime
 from unittest.mock import AsyncMock, patch
-from src.Models.schemas import Receipt, LineItem
+from src.Models.schemas import LineItem, Receipt, ScanContext
 from src.Services.extraction_service import ExtractionService
 
 
@@ -254,6 +254,361 @@ def test_scan_parse_many_batch_status_not_found(client, mock_device):
     # 503 when Redis client is not initialised in test context,
     # 404 when batch is not found, 500 when Redis is initialised but unreachable
     assert response.status_code in (404, 500, 503)
+
+
+# ── Provider Error & Batch Halt Unit Tests ─────────────────────────────
+
+import pytest
+from src.Services.extraction_service import (
+    FRIENDLY_ERROR_MESSAGE,
+    ProviderOverloadedError,
+    is_provider_overload_error,
+)
+from src.API.v1.scan import process_batch_worker
+import src.API.v1.scan as scan_module
+
+
+def test_is_provider_overload_error_detection():
+    """Verify various provider overload / rate limit error patterns."""
+    assert is_provider_overload_error(Exception("429 ResourceExhausted: token usage limit exceeded"))
+    assert is_provider_overload_error(Exception("500 Internal Server Error: model experiencing high demand"))
+    assert is_provider_overload_error(Exception("503 Service Unavailable"))
+    assert is_provider_overload_error(Exception("Quota exceeded for quota metric"))
+    assert is_provider_overload_error(ProviderOverloadedError())
+
+    # Non-overload errors
+    assert not is_provider_overload_error(ValueError("Invalid date format"))
+    assert not is_provider_overload_error(Exception("File corrupted"))
+
+
+@pytest.mark.anyio
+async def test_extraction_service_retry_jitter_success():
+    """ExtractionService (Gemini provider) retries on 429 and succeeds on subsequent attempt."""
+    mock_receipt = Receipt(
+        merchant_name="Costco",
+        line_items=[],
+        total_amount=50.0,
+        currency="USD",
+        category="Groceries",
+        date=datetime.now(),
+        raw_text="COSTCO WHOLESALE",
+        confidence_score=0.9,
+    )
+
+    service = ExtractionService()
+    context = ScanContext(
+        image_bytes=b"dummy_bytes",
+        content_type="image/jpeg",
+        user_id=None,
+        device_id=None,
+    )
+
+    call_count = 0
+
+    async def mock_generate_content(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise Exception("429 ResourceExhausted: rate limit")
+        # Return mock response on attempt 2
+        class MockResp:
+            text = mock_receipt.model_dump_json()
+            usage_metadata = None
+        return MockResp()
+
+    with patch.object(service._gemini_client.aio.models, "generate_content", side_effect=mock_generate_content), \
+         patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        res = await service.extract_from_image(context)
+        assert res.merchant_name == "Costco"
+        assert call_count == 2
+        assert mock_sleep.call_count == 1
+
+
+@pytest.mark.anyio
+async def test_extraction_service_retry_exhausted_raises_provider_error():
+    """ExtractionService (Gemini) exhausts 3 retries and raises ProviderOverloadedError with friendly message."""
+    service = ExtractionService()
+    context = ScanContext(
+        image_bytes=b"dummy_bytes",
+        content_type="image/jpeg",
+        user_id=None,
+        device_id=None,
+    )
+
+    with patch.object(service._gemini_client.aio.models, "generate_content", side_effect=Exception("500 model experiencing high demand")), \
+         patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        with pytest.raises(ProviderOverloadedError) as exc_info:
+            await service.extract_from_image(context)
+
+        assert str(exc_info.value) == FRIENDLY_ERROR_MESSAGE
+        assert mock_sleep.call_count == 3
+
+
+@pytest.mark.anyio
+async def test_extraction_service_openrouter_success():
+    """ExtractionService (OpenRouter provider) sends image to OpenRouter and returns structured Receipt."""
+    from unittest.mock import MagicMock
+    import httpx
+
+    mock_receipt = Receipt(
+        merchant_name="Starbucks",
+        line_items=[],
+        total_amount=8.50,
+        currency="USD",
+        category="Dining",
+        date=datetime.now(),
+        raw_text="STARBUCKS\nLATTE $8.50",
+        confidence_score=0.92,
+    )
+
+    # Build service directly, bypassing __init__, then inject a mock settings + http client
+    service = ExtractionService.__new__(ExtractionService)
+
+    mock_settings = MagicMock()
+    mock_settings.effective_ai_provider = "openrouter"
+    mock_settings.openrouter_vision_model = "google/gemini-2.5-flash"
+    service.settings = mock_settings
+
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    mock_response = MagicMock()
+    mock_response.raise_for_status = MagicMock()
+    mock_response.json.return_value = {
+        "choices": [{"message": {"content": mock_receipt.model_dump_json()}}]
+    }
+    mock_http.post = AsyncMock(return_value=mock_response)
+
+    service._gemini_client = None
+    service._http_client = mock_http
+
+    context = ScanContext(
+        image_bytes=b"openrouter_image_bytes",
+        content_type="image/jpeg",
+        user_id=None,
+        device_id=None,
+    )
+
+    result = await service.extract_from_image(context)
+
+    assert result.merchant_name == "Starbucks"
+    assert result.confidence_score == 0.92
+    assert mock_http.post.called
+
+
+@pytest.mark.anyio
+async def test_extraction_service_openrouter_retry_on_429():
+    """ExtractionService (OpenRouter provider) retries on HTTP 429 and succeeds on next attempt."""
+    from unittest.mock import MagicMock
+    import httpx
+
+    mock_receipt = Receipt(
+        merchant_name="McDonald's",
+        line_items=[],
+        total_amount=12.0,
+        currency="USD",
+        category="Dining",
+        date=datetime.now(),
+        raw_text="MCDONALD'S\nBIG MAC $12.00",
+        confidence_score=0.88,
+    )
+
+    service = ExtractionService.__new__(ExtractionService)
+
+    mock_settings = MagicMock()
+    mock_settings.effective_ai_provider = "openrouter"
+    mock_settings.openrouter_vision_model = "google/gemini-2.5-flash"
+    mock_settings.MAX_RETRIES = 3
+    service.settings = mock_settings
+    service.MAX_RETRIES = ExtractionService.MAX_RETRIES
+    service.BASE_DELAY_SECONDS = ExtractionService.BASE_DELAY_SECONDS
+
+    call_count = 0
+
+    async def mock_post(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise Exception("429 Too Many Requests: rate limit exceeded")
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = {
+            "choices": [{"message": {"content": mock_receipt.model_dump_json()}}]
+        }
+        return resp
+
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    mock_http.post = AsyncMock(side_effect=mock_post)
+    service._gemini_client = None
+    service._http_client = mock_http
+
+    context = ScanContext(
+        image_bytes=b"openrouter_image_bytes",
+        content_type="image/jpeg",
+        user_id=None,
+        device_id=None,
+    )
+
+    with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+        result = await service.extract_from_image(context)
+        assert result.merchant_name == "McDonald's"
+        assert call_count == 2
+        assert mock_sleep.call_count == 1
+
+
+@pytest.mark.anyio
+async def test_batch_worker_first_job_429_halts_entire_batch():
+    """If the first job in a batch fails with 429, halt immediately and mark remaining jobs failed with friendly error."""
+    mock_redis = AsyncMock()
+    original_redis = scan_module.redis_client
+    scan_module.redis_client = mock_redis
+
+    try:
+        job_items = [
+            ("job-1", "receipt1.jpg", b"bytes1", "image/jpeg"),
+            ("job-2", "receipt2.jpg", b"bytes2", "image/jpeg"),
+            ("job-3", "receipt3.jpg", b"bytes3", "image/jpeg"),
+        ]
+
+        with patch.object(ExtractionService, "extract_from_image", side_effect=ProviderOverloadedError()):
+            await process_batch_worker("batch-test-1", job_items)
+
+        # Verify job-1, job-2, job-3 were all set to FAILED with FRIENDLY_ERROR_MESSAGE
+        hset_calls = mock_redis.hset.call_args_list
+
+        # Verify halted_on_first_job flag set in batch metadata
+        meta_calls = [c for c in hset_calls if c[0][0] == "batch:batch-test-1:meta"]
+        assert len(meta_calls) > 0
+        assert meta_calls[0][0][1] == "halted_on_first_job"
+        assert meta_calls[0][0][2] == "true"
+
+        # Verify all 3 jobs marked FAILED
+        job1_fail = any(c[0][0] == "job:job-1" and c[1].get("mapping", {}).get("status") == "FAILED" for c in hset_calls)
+        job2_fail = any(c[0][0] == "job:job-2" and c[1].get("mapping", {}).get("status") == "FAILED" for c in hset_calls)
+        job3_fail = any(c[0][0] == "job:job-3" and c[1].get("mapping", {}).get("status") == "FAILED" for c in hset_calls)
+
+        assert job1_fail
+        assert job2_fail
+        assert job3_fail
+
+    finally:
+        scan_module.redis_client = original_redis
+
+
+@pytest.mark.anyio
+async def test_batch_worker_second_job_500_preserves_first_job():
+    """If the 2nd job fails with 500, preserve job 1 COMPLETED and halt remaining jobs."""
+    mock_redis = AsyncMock()
+    original_redis = scan_module.redis_client
+    scan_module.redis_client = mock_redis
+
+    mock_receipt = Receipt(
+        merchant_name="Walmart",
+        line_items=[],
+        total_amount=25.0,
+        currency="USD",
+        category="Groceries",
+        date=datetime.now(),
+        raw_text="WALMART",
+        confidence_score=0.95,
+    )
+
+    try:
+        job_items = [
+            ("job-1", "receipt1.jpg", b"bytes1", "image/jpeg"),
+            ("job-2", "receipt2.jpg", b"bytes2", "image/jpeg"),
+            ("job-3", "receipt3.jpg", b"bytes3", "image/jpeg"),
+        ]
+
+        async def mock_extract(context):
+            if context.image_bytes == b"bytes1":
+                return mock_receipt
+            raise ProviderOverloadedError()
+
+        with patch.object(ExtractionService, "extract_from_image", side_effect=mock_extract):
+            await process_batch_worker("batch-test-2", job_items)
+
+        hset_calls = mock_redis.hset.call_args_list
+
+        # Job 1 was marked COMPLETED
+        job1_completed = any(c[0][0] == "job:job-1" and c[1].get("mapping", {}).get("status") == "COMPLETED" for c in hset_calls)
+        assert job1_completed
+
+        # Job 2 & 3 marked FAILED
+        job2_failed = any(c[0][0] == "job:job-2" and c[1].get("mapping", {}).get("status") == "FAILED" for c in hset_calls)
+        job3_failed = any(c[0][0] == "job:job-3" and c[1].get("mapping", {}).get("status") == "FAILED" for c in hset_calls)
+        assert job2_failed
+        assert job3_failed
+
+        # Metadata flagged halted_on_provider_error
+        meta_calls = [c for c in hset_calls if c[0][0] == "batch:batch-test-2:meta"]
+        assert len(meta_calls) > 0
+        assert meta_calls[0][0][1] == "halted_on_provider_error"
+
+    finally:
+        scan_module.redis_client = original_redis
+
+
+@pytest.mark.anyio
+async def test_batch_worker_low_confidence_marks_job_failed_with_notes():
+    """If an image has confidence_score below threshold (e.g. 0.0), mark as FAILED with error notes and continue."""
+    mock_redis = AsyncMock()
+    original_redis = scan_module.redis_client
+    scan_module.redis_client = mock_redis
+
+    mock_invalid_receipt = Receipt(
+        merchant_name="N/A",
+        line_items=[],
+        total_amount=0.0,
+        currency="USD",
+        category="Other",
+        date=datetime.now(),
+        raw_text="",
+        confidence_score=0.0,
+        notes="Image does not contain a receipt or financial document.",
+    )
+
+    mock_valid_receipt = Receipt(
+        merchant_name="Whole Foods",
+        line_items=[],
+        total_amount=15.0,
+        currency="USD",
+        category="Groceries",
+        date=datetime.now(),
+        raw_text="WHOLE FOODS",
+        confidence_score=0.92,
+    )
+
+    try:
+        job_items = [
+            ("job-1", "landscape.jpg", b"invalid_bytes", "image/jpeg"),
+            ("job-2", "receipt.jpg", b"valid_bytes", "image/jpeg"),
+        ]
+
+        async def mock_extract(context):
+            if context.image_bytes == b"invalid_bytes":
+                return mock_invalid_receipt
+            return mock_valid_receipt
+
+        with patch.object(ExtractionService, "extract_from_image", side_effect=mock_extract):
+            await process_batch_worker("batch-test-3", job_items)
+
+        hset_calls = mock_redis.hset.call_args_list
+
+        # Job 1 was marked FAILED with notes in error
+        job1_failed_call = next(
+            (c for c in hset_calls if c[0][0] == "job:job-1" and c[1].get("mapping", {}).get("status") == "FAILED"),
+            None,
+        )
+        assert job1_failed_call is not None
+        assert "Image does not contain a receipt" in job1_failed_call[1]["mapping"]["error"]
+
+        # Job 2 was marked COMPLETED (batch was not halted)
+        job2_completed = any(
+            c[0][0] == "job:job-2" and c[1].get("mapping", {}).get("status") == "COMPLETED" for c in hset_calls
+        )
+        assert job2_completed
+
+    finally:
+        scan_module.redis_client = original_redis
 
 
 if __name__ == "__main__":

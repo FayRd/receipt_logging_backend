@@ -65,15 +65,17 @@ Document Validation & Confidence Scoring Rules:
 1. Document Verification & Confidence Score (Float 0.0 to 1.0):
    - Assign 0.8 to 1.0 if the image is a valid, legible receipt, retail slip, invoice, bill, bank statement, or financial document with clear merchant/institution header, line items, transaction date, or financial total.
    - Assign 0.0 to 0.79 if the image is NOT a financial receipt/statement (e.g. photos, landscapes, animals, memes, non-financial documents), if the image is completely illegible/corrupted, or if it is a random snippet lacking financial totals and merchant context.
-2. date: Format as ISO 8601 (e.g. 2026-03-30T14:30:00Z). Use today's date if not visible.
-3. raw_text: Transcribe every visible character from top to bottom.
-4. category: Infer from context. Must be one of: Dining, Groceries, Transport, Utilities, Shopping, Entertainment, Health, Supplies, Other.
-5. currency: ISO 4217 code (e.g. USD, SGD, MYR, EUR, GBP). Default to USD if unclear.
-6. line_items: Extract all purchased products, items, and services. Also extract:
+2. merchant_name: Name of the merchant/store/institution. If missing, illegible, or the image is not a receipt, use "N/A" (do NOT output null).
+3. total_amount: Transaction total number. If not found or the image is not a receipt, use 0.0 (do NOT output null).
+4. date: Format as ISO 8601 (e.g. 2026-03-30T14:30:00Z). Use today's date if not visible.
+5. raw_text: Transcribe every visible character from top to bottom.
+6. category: Infer from context. Must be one of: Dining, Groceries, Transport, Utilities, Shopping, Entertainment, Health, Supplies, Other.
+7. currency: ISO 4217 code (e.g. USD, SGD, MYR, EUR, GBP). Default to USD if unclear.
+8. line_items: Extract all purchased products, items, and services. Also extract:
    - Surcharges (e.g. Service Charge, GST/VAT/Tax, Delivery Fee, Tips, Surcharge) as separate line items with positive unit_price and total_price values.
    - Discounts (e.g. Vouchers, Coupons, Member Discounts, Promo Codes, Special Reductions, Trade-ins, Deductions) as separate line items with NEGATIVE unit_price and total_price values (e.g. -2.50).
-7. Set missing optional fields to null.
-8. Output ONLY valid JSON matching the schema. No prose, no markdown wrappers.
+9. Set missing optional fields (subtotal, tax_amount, notes, line_items, category) to null.
+10. Output ONLY valid JSON matching the schema. No prose, no markdown wrappers.
 """.strip()
 
 # JSON schema description embedded in the OpenRouter system prompt so models that do not support
@@ -81,11 +83,11 @@ Document Validation & Confidence Scoring Rules:
 OPENROUTER_JSON_SCHEMA_HINT = """
 Output JSON must match this exact schema (all field names are snake_case):
 {
-  "merchant_name": string,
+  "merchant_name": string (use "N/A" if unknown or not a receipt, do NOT use null),
   "line_items": [ { "description": string, "quantity": number|null, "unit_price": number|null, "total_price": number|null } ] | null,
   "subtotal": number|null,
   "tax_amount": number|null,
-  "total_amount": number,
+  "total_amount": number (use 0.0 if not found, do NOT use null),
   "currency": string,
   "category": string|null,
   "date": string (ISO 8601),

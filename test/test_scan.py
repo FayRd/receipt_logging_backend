@@ -284,6 +284,8 @@ def test_is_provider_overload_error_detection():
 @pytest.mark.anyio
 async def test_extraction_service_retry_jitter_success():
     """ExtractionService (Gemini provider) retries on 429 and succeeds on subsequent attempt."""
+    from unittest.mock import MagicMock
+
     mock_receipt = Receipt(
         merchant_name="Costco",
         line_items=[],
@@ -295,7 +297,19 @@ async def test_extraction_service_retry_jitter_success():
         confidence_score=0.9,
     )
 
-    service = ExtractionService()
+    service = ExtractionService.__new__(ExtractionService)
+    mock_settings = MagicMock()
+    mock_settings.effective_ai_provider = "gemini"
+    mock_settings.gemini_vision_model = "gemini-3.6-flash"
+    service.settings = mock_settings
+    service.MAX_RETRIES = ExtractionService.MAX_RETRIES
+    service.BASE_DELAY_SECONDS = ExtractionService.BASE_DELAY_SECONDS
+
+    mock_gemini = MagicMock()
+    mock_gemini.aio.models.generate_content = AsyncMock()
+    service._gemini_client = mock_gemini
+    service._http_client = None
+
     context = ScanContext(
         image_bytes=b"dummy_bytes",
         content_type="image/jpeg",
@@ -316,8 +330,9 @@ async def test_extraction_service_retry_jitter_success():
             usage_metadata = None
         return MockResp()
 
-    with patch.object(service._gemini_client.aio.models, "generate_content", side_effect=mock_generate_content), \
-         patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+    mock_gemini.aio.models.generate_content.side_effect = mock_generate_content
+
+    with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
         res = await service.extract_from_image(context)
         assert res.merchant_name == "Costco"
         assert call_count == 2
@@ -327,7 +342,21 @@ async def test_extraction_service_retry_jitter_success():
 @pytest.mark.anyio
 async def test_extraction_service_retry_exhausted_raises_provider_error():
     """ExtractionService (Gemini) exhausts 3 retries and raises ProviderOverloadedError with friendly message."""
-    service = ExtractionService()
+    from unittest.mock import MagicMock
+
+    service = ExtractionService.__new__(ExtractionService)
+    mock_settings = MagicMock()
+    mock_settings.effective_ai_provider = "gemini"
+    mock_settings.gemini_vision_model = "gemini-3.6-flash"
+    service.settings = mock_settings
+    service.MAX_RETRIES = ExtractionService.MAX_RETRIES
+    service.BASE_DELAY_SECONDS = ExtractionService.BASE_DELAY_SECONDS
+
+    mock_gemini = MagicMock()
+    mock_gemini.aio.models.generate_content = AsyncMock(side_effect=Exception("500 model experiencing high demand"))
+    service._gemini_client = mock_gemini
+    service._http_client = None
+
     context = ScanContext(
         image_bytes=b"dummy_bytes",
         content_type="image/jpeg",
@@ -335,8 +364,7 @@ async def test_extraction_service_retry_exhausted_raises_provider_error():
         device_id=None,
     )
 
-    with patch.object(service._gemini_client.aio.models, "generate_content", side_effect=Exception("500 model experiencing high demand")), \
-         patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+    with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
         with pytest.raises(ProviderOverloadedError) as exc_info:
             await service.extract_from_image(context)
 
@@ -452,6 +480,89 @@ async def test_extraction_service_openrouter_retry_on_429():
         assert result.merchant_name == "McDonald's"
         assert call_count == 2
         assert mock_sleep.call_count == 1
+
+
+@pytest.mark.anyio
+async def test_receipt_pydantic_coercion_handles_null_merchant_and_fields():
+    """Receipt model validates and coerces null fields emitted by lightweight LLMs into safe defaults."""
+    raw_json = """{
+        "merchant_name": null,
+        "line_items": [{"description": null, "quantity": 1, "unit_price": 5.0, "total_price": 5.0}],
+        "subtotal": null,
+        "tax_amount": null,
+        "total_amount": null,
+        "currency": null,
+        "category": null,
+        "date": null,
+        "raw_text": null,
+        "confidence_score": null,
+        "notes": "Non-receipt image"
+    }"""
+    receipt = Receipt.model_validate_json(raw_json)
+    assert receipt.merchant_name == "N/A"
+    assert receipt.total_amount == 0.0
+    assert receipt.currency == "USD"
+    assert receipt.raw_text == ""
+    assert receipt.confidence_score == 0.0
+    assert receipt.line_items[0].description == ""
+    assert receipt.notes == "Non-receipt image"
+    assert receipt.date is not None
+
+
+@pytest.mark.anyio
+async def test_extraction_service_openrouter_null_merchant_handled_gracefully():
+    """ExtractionService with OpenRouter model emitting null merchant_name parses into valid Receipt with 'N/A'."""
+    from unittest.mock import MagicMock
+    import httpx
+
+    service = ExtractionService.__new__(ExtractionService)
+
+    mock_settings = MagicMock()
+    mock_settings.effective_ai_provider = "openrouter"
+    mock_settings.openrouter_vision_model = "google/gemini-2.5-flash-lite"
+    mock_settings.MAX_RETRIES = 3
+    service.settings = mock_settings
+    service.MAX_RETRIES = ExtractionService.MAX_RETRIES
+    service.BASE_DELAY_SECONDS = ExtractionService.BASE_DELAY_SECONDS
+
+    # Emulate payload returned by gemini-2.5-flash-lite on proof.png with null merchant
+    mock_llm_json = """{
+        "merchant_name": null,
+        "line_items": null,
+        "subtotal": null,
+        "tax_amount": null,
+        "total_amount": 0.0,
+        "currency": "USD",
+        "category": null,
+        "date": "2026-08-21T19:42:40Z",
+        "raw_text": "Transfer Proof",
+        "confidence_score": 0.25,
+        "notes": "Image is a transfer proof, not a merchant receipt."
+    }"""
+
+    mock_http = AsyncMock(spec=httpx.AsyncClient)
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    resp.json.return_value = {
+        "choices": [{"message": {"content": mock_llm_json}}]
+    }
+    mock_http.post = AsyncMock(return_value=resp)
+
+    service._gemini_client = None
+    service._http_client = mock_http
+
+    context = ScanContext(
+        image_bytes=b"proof_image_bytes",
+        content_type="image/png",
+        user_id=None,
+        device_id=None,
+    )
+
+    result = await service.extract_from_image(context)
+    assert result.merchant_name == "N/A"
+    assert result.confidence_score == 0.25
+    assert result.notes == "Image is a transfer proof, not a merchant receipt."
+
 
 
 @pytest.mark.anyio

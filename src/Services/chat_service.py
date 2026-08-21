@@ -12,7 +12,7 @@ logger = get_logger("Services.chat_service")
 
 CHAT_SYSTEM_PROMPT = """
 You are a personalized financial assistant inside the Receipt Logger app.
-Your task is to answer user questions accurately based on their logged receipts and spending habits.
+Your task is to answer user questions and provide advice accurately based on their logged receipts and spending habits.
 
 Rules:
 1. Be concise and helpful. No fluff.

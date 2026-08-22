@@ -9,7 +9,12 @@ from src.Auth.identity import Identity, get_scoped_identity, get_sse_identity
 from src.Auth.rate_limiter import rate_limit
 from src.Infrastructure.logger import get_logger
 from src.Models.schemas import BulkBatchStatusResponse, BulkJobCreateResponse, Receipt, ScanContext, ScanResponse
-from src.Services.extraction_service import ExtractionService
+from src.Services.extraction_service import (
+    ExtractionService,
+    FRIENDLY_ERROR_MESSAGE,
+    ProviderOverloadedError,
+    is_provider_overload_error,
+)
 from src.config import get_settings
 
 router = APIRouter(prefix="/scan", tags=["Scanning"])
@@ -31,58 +36,143 @@ async def get_extraction_service() -> ExtractionService:
     return ExtractionService()
 
 
-# ── BACKGROUND WORKER ────────────────────────────────────────────────
+# ── BATCH BACKGROUND WORKER ──────────────────────────────────────────
 
-async def process_receipt_worker(job_id: str, image_bytes: bytes, content_type: str) -> None:
-    """Background worker that runs Gemini vision extraction for a single receipt job.
+async def process_batch_worker(
+    batch_id: str,
+    job_items: list[tuple[str, str, bytes, str]],  # [(job_id, filename, image_bytes, content_type)]
+) -> None:
+    """Background worker that processes a batch of receipt jobs sequentially.
 
-    Updates the Redis job hash with status transitions:
-    PENDING -> PROCESSING -> COMPLETED | FAILED
+    If the first job or any job encounters an unrecoverable 429/500/provider error:
+    - Marks current job FAILED with friendly error.
+    - Immediately halts remaining pending jobs and marks them FAILED with friendly error.
+    - If it's the first job (index 0), records 'halted_on_first_job' in batch metadata.
+    - If it's a subsequent job (index > 0), earlier completed jobs are preserved.
     """
     if not redis_client:
-        logger.error("Redis client not initialized for worker task %s", job_id)
+        logger.error("Redis client not initialized for batch worker task %s", batch_id)
         return
 
-    job_key = f"job:{job_id}"
+    service = ExtractionService()
+    batch_meta_key = f"batch:{batch_id}:meta"
+    start_time = asyncio.get_event_loop().time()
+    settings = get_settings()
 
-    # Step 1: Set status to PROCESSING
-    logger.info("Worker processing started for job %s", job_id)
-    await redis_client.hset(job_key, "status", "PROCESSING")
+    for index, (job_id, filename, image_bytes, content_type) in enumerate(job_items):
+        job_key = f"job:{job_id}"
 
-    try:
-        # Step 2: Use ExtractionService for full Receipt schema extraction
-        service = ExtractionService()
-        context = ScanContext(
-            image_bytes=image_bytes,
-            content_type=content_type,
-            user_id=None,
-            device_id=None,
+        # Check overall timeout limit
+        elapsed = asyncio.get_event_loop().time() - start_time
+        if elapsed >= settings.sse_batch_timeout_seconds:
+            logger.warning("Batch %s worker timed out after %.2fs. Failing remaining jobs.", batch_id, elapsed)
+            for rem_job_id, _, _, _ in job_items[index:]:
+                await redis_client.hset(
+                    f"job:{rem_job_id}",
+                    mapping={
+                        "status": "FAILED",
+                        "error": "Batch processing timed out",
+                    },
+                )
+            break
+
+        # Step 1: Set status to PROCESSING
+        logger.info(
+            "Worker processing started for job %s (index %d/%d, batch %s, file=%s)",
+            job_id,
+            index + 1,
+            len(job_items),
+            batch_id,
+            filename,
         )
-        receipt: Receipt = await service.extract_from_image(context)
+        await redis_client.hset(job_key, "status", "PROCESSING")
 
-        # Serialize the full Receipt model to JSON for storage
-        result_text = receipt.model_dump_json()
+        try:
+            context = ScanContext(
+                image_bytes=image_bytes,
+                content_type=content_type,
+                user_id=None,
+                device_id=None,
+            )
+            receipt: Receipt = await service.extract_from_image(context)
 
-        # Step 3: Write result and update status to COMPLETED
-        await redis_client.hset(
-            job_key,
-            mapping={
-                "result": result_text,
-                "status": "COMPLETED",
-            },
-        )
-        logger.info("Worker job %s COMPLETED successfully", job_id)
+            # Enforce document validation threshold (must be >= confidence_threshold)
+            confidence = receipt.confidence_score if receipt.confidence_score is not None else 0.0
+            if confidence < settings.confidence_threshold:
+                error_msg = receipt.notes or (
+                    f"Invalid document type. The uploaded image does not appear to be a valid receipt or "
+                    f"financial statement (confidence score {confidence:.2f} is below the {settings.confidence_threshold} threshold)."
+                )
+                logger.warning(
+                    "Worker job %s confidence score %.2f is below threshold %.2f (filename=%s): %s",
+                    job_id,
+                    confidence,
+                    settings.confidence_threshold,
+                    filename,
+                    error_msg,
+                )
+                await redis_client.hset(
+                    job_key,
+                    mapping={
+                        "status": "FAILED",
+                        "error": error_msg,
+                    },
+                )
+                # Continue processing remaining jobs in batch
+                continue
 
-    except Exception as e:
-        logger.error("Error processing receipt job %s: %s", job_id, e, exc_info=True)
-        # Step 4: Record error and set status to FAILED
-        await redis_client.hset(
-            job_key,
-            mapping={
-                "error": str(e),
-                "status": "FAILED",
-            },
-        )
+            result_text = receipt.model_dump_json()
+
+            await redis_client.hset(
+                job_key,
+                mapping={
+                    "result": result_text,
+                    "status": "COMPLETED",
+                },
+            )
+            logger.info("Worker job %s COMPLETED successfully in batch %s", job_id, batch_id)
+
+        except Exception as e:
+            logger.error("Error processing receipt job %s in batch %s: %s", job_id, batch_id, e, exc_info=True)
+            is_overload = is_provider_overload_error(e)
+
+            if is_overload:
+                error_msg = FRIENDLY_ERROR_MESSAGE
+                await redis_client.hset(
+                    job_key,
+                    mapping={
+                        "error": error_msg,
+                        "status": "FAILED",
+                    },
+                )
+                # If first job failed with provider overload error
+                if index == 0:
+                    logger.warning("First job %s failed with provider overload error. Halting entire batch %s.", job_id, batch_id)
+                    await redis_client.hset(batch_meta_key, "halted_on_first_job", "true")
+                else:
+                    logger.warning("Job %s (index %d) failed with provider overload error. Halting remaining jobs in batch %s.", job_id, index, batch_id)
+                    await redis_client.hset(batch_meta_key, "halted_on_provider_error", "true")
+
+                # Mark all subsequent pending jobs in the batch as FAILED with friendly error
+                for rem_job_id, _, _, _ in job_items[index + 1:]:
+                    await redis_client.hset(
+                        f"job:{rem_job_id}",
+                        mapping={
+                            "error": error_msg,
+                            "status": "FAILED",
+                        },
+                    )
+                # Halt batch processing immediately
+                break
+            else:
+                # Non-overload error (e.g. invalid document or corrupted image): mark only this job FAILED
+                await redis_client.hset(
+                    job_key,
+                    mapping={
+                        "error": str(e),
+                        "status": "FAILED",
+                    },
+                )
 
 
 # ── SINGLE PARSE ENDPOINT (DEPRECATED) ─────────────────────────────────
@@ -266,11 +356,13 @@ async def parse_many_receipts(
     batch_id = str(uuid.uuid4())
     batch_key = f"batch:{batch_id}"
     jobs_response = []
+    job_items: list[tuple[str, str, bytes, str]] = []
 
     try:
         for file, (image_bytes, content_type) in zip(files, file_payloads):
             job_id = str(uuid.uuid4())
             job_key = f"job:{job_id}"
+            filename = file.filename or "receipt.jpg"
 
             # Set initial PENDING status with configured TTL
             await redis_client.hset(
@@ -278,7 +370,7 @@ async def parse_many_receipts(
                 mapping={
                     "job_id": job_id,
                     "batch_id": batch_id,
-                    "filename": file.filename or "receipt.jpg",
+                    "filename": filename,
                     "status": "PENDING",
                 },
             )
@@ -287,13 +379,14 @@ async def parse_many_receipts(
             # Add job_id to batch set
             await redis_client.sadd(batch_key, job_id)
 
-            # Schedule worker with pre-read bytes
-            background_tasks.add_task(process_receipt_worker, job_id, image_bytes, content_type)
-
+            job_items.append((job_id, filename, image_bytes, content_type))
             jobs_response.append({
                 "job_id": job_id,
-                "filename": file.filename,
+                "filename": filename,
             })
+
+        # Schedule batch worker to process jobs sequentially and handle provider halts
+        background_tasks.add_task(process_batch_worker, batch_id, job_items)
 
         await redis_client.expire(batch_key, settings.redis_job_ttl_seconds)
 
@@ -409,7 +502,7 @@ async def get_parse_many_batch_status(
                     "batch_id": job_hash.get("batch_id", batch_id),
                     "filename": job_hash.get("filename"),
                     "status": status_val,
-                    "data": parsed_data,
+                    "data": parsed_data if status_val == "COMPLETED" else None,
                     "error": job_hash.get("error"),
                 }
                 jobs_data.append(job_entry)
@@ -534,9 +627,26 @@ async def stream_parse_many_batch(
                 yield f"event: progress\ndata: {json.dumps(progress_payload)}\n\n"
 
             if all(s in terminal for s in statuses):
+                meta_hash = await redis_client.hgetall(f"batch:{batch_id}:meta")
+                halted_on_first = (meta_hash.get("halted_on_first_job") == "true") if meta_hash else False
+
+                # If batch halted on first job due to 429/500 provider error with 0 completed receipts
+                if halted_on_first and completed_count == 0:
+                    logger.warning(
+                        "Batch %s halted on first job due to provider error. Emitting error SSE event.",
+                        batch_id,
+                    )
+                    yield f"event: error\ndata: {json.dumps({'error': FRIENDLY_ERROR_MESSAGE})}\n\n"
+                    return
+
                 # Fetch complete batch data object and send directly in SSE data field
                 batch_data = await get_parse_many_batch_status(batch_id, identity=identity)
-                logger.info("Batch %s complete. Emitting batch_complete SSE event with full JSON payload.", batch_id)
+                logger.info(
+                    "Batch %s complete (%d completed, %d failed). Emitting batch_complete SSE event.",
+                    batch_id,
+                    completed_count,
+                    len(job_ids) - completed_count,
+                )
                 yield f"event: batch_complete\ndata: {json.dumps(batch_data)}\n\n"
                 return
 

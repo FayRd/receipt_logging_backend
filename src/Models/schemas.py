@@ -1,32 +1,87 @@
 import json
 from dataclasses import dataclass
 from pydantic import BaseModel, ConfigDict, Field, field_validator, AliasChoices
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 class LineItem(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    description: str
+    description: str = ""
     quantity: float | None = None
     unit_price: float | None = None
     total_price: float | None = None
+
+    @field_validator("description", mode="before")
+    @classmethod
+    def coerce_description(cls, v):
+        if v is None:
+            return ""
+        return str(v)
 
 
 class Receipt(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
-    merchant_name: str
+    merchant_name: str = "N/A"
     line_items: list[LineItem] | None = None
     subtotal: float | None = None
     tax_amount: float | None = None
-    total_amount: float
+    total_amount: float = 0.0
     currency: str = "USD"
     category: str | None = None
-    date: str | datetime
+    date: str | datetime = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     raw_text: str = ""
     confidence_score: float = 0.0
     notes: str | None = None
+
+    @field_validator("merchant_name", mode="before")
+    @classmethod
+    def coerce_merchant_name(cls, v):
+        if v is None or not str(v).strip():
+            return "N/A"
+        return str(v).strip()
+
+    @field_validator("total_amount", mode="before")
+    @classmethod
+    def coerce_total_amount(cls, v):
+        if v is None:
+            return 0.0
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return 0.0
+
+    @field_validator("currency", mode="before")
+    @classmethod
+    def coerce_currency(cls, v):
+        if v is None or not str(v).strip():
+            return "USD"
+        return str(v).strip()
+
+    @field_validator("date", mode="before")
+    @classmethod
+    def coerce_date(cls, v):
+        if v is None or not str(v).strip():
+            return datetime.now(timezone.utc).isoformat()
+        return v
+
+    @field_validator("raw_text", mode="before")
+    @classmethod
+    def coerce_raw_text(cls, v):
+        if v is None:
+            return ""
+        return str(v)
+
+    @field_validator("confidence_score", mode="before")
+    @classmethod
+    def coerce_confidence_score(cls, v):
+        if v is None:
+            return 0.0
+        try:
+            return float(v)
+        except (ValueError, TypeError):
+            return 0.0
 
 
 @dataclass

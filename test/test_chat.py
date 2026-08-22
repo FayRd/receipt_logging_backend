@@ -248,11 +248,11 @@ def test_update_chat_title_unowned(client, mock_user_session):
 
 @patch("src.Services.chat_service.ChatService.generate_response", new_callable=AsyncMock)
 def test_chat_query_failure_does_not_create_conversation(mock_gen, client, mock_user_session):
-    """If Gemini AI fails on first turn, no conversation is created in Supabase."""
-    mock_gen.side_effect = RuntimeError("Gemini API Error")
+    """If the AI provider fails on first turn, no conversation is created in Supabase."""
+    mock_gen.side_effect = RuntimeError("AI Provider API Error")
 
     res = client.post("/api/v1/chat/query", json={
-        "message": "This query will fail in Gemini",
+        "message": "This query will fail",
     }, headers=mock_user_session["user_scan_headers"])
 
     assert res.status_code == 500
@@ -260,6 +260,44 @@ def test_chat_query_failure_does_not_create_conversation(mock_gen, client, mock_
     # Verify conversation was not created
     list_res = client.get("/api/v1/chat/list", headers=mock_user_session["headers"])
     assert list_res.status_code == 200
+
+
+@patch("src.Services.chat_service.ChatService.generate_response", new_callable=AsyncMock)
+def test_chat_query_openrouter_provider_success(mock_gen, client, mock_user_session):
+    """OpenRouter provider path: generate_response returns an AI response through the same endpoint."""
+    mock_gen.return_value = "OpenRouter AI response from google/gemini-2.5-flash."
+
+    create_res = client.post("/api/v1/chat/create", headers=mock_user_session["headers"])
+    conv_id = create_res.json()["id"]
+
+    res = client.post("/api/v1/chat/query", json={
+        "conversation_id": conv_id,
+        "message": "How much did I spend on groceries?"
+    }, headers=mock_user_session["user_scan_headers"])
+
+    assert res.status_code == 200
+    data = res.json()
+    assert data["conversation_id"] == conv_id
+    assert "OpenRouter AI response" in data["assistant_message"]["content"]
+    assert mock_gen.called
+
+
+@patch("src.Services.chat_service.ChatService.generate_response_local", new_callable=AsyncMock)
+def test_chat_query_openrouter_guest_mode(mock_gen, client, mock_device):
+    """OpenRouter provider path (guest mode): generate_response_local returns response via same endpoint."""
+    mock_gen.return_value = "OpenRouter guest response."
+
+    res = client.post("/api/v1/chat/query", json={
+        "message": "Show my receipts.",
+        "conversation_history": [],
+        "recent_receipts": []
+    }, headers=mock_device["guest_scan_headers"])
+
+    assert res.status_code == 200
+    data = res.json()
+    assert data["conversation_id"] is None
+    assert data["assistant_message"]["content"] == "OpenRouter guest response."
+    assert mock_gen.called
 
 
 if __name__ == "__main__":

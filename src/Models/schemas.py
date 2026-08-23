@@ -436,3 +436,21 @@ class DeviceRecord(BaseModel):
 class DeviceTokenRotateRequest(BaseModel):
     """Request body for rotating an existing device's secret authentication token."""
     new_device_token: str = Field(..., min_length=8, max_length=256, description="Fresh secret device authentication token.")
+
+
+# ── HELP & FEEDBACK SCHEMAS ───────────────────────────────────────────────────
+
+class FeedbackSubmitRequest(BaseModel):
+    """Request payload for submitting user/device feedback."""
+    sender: str = Field(..., min_length=3, max_length=100, description="Username or device UUID identifier")
+    description: str = Field(..., min_length=25, max_length=2000, description="Feedback message content (25 - 2000 characters)")
+    app_version: str | None = Field(default="1.0.0", max_length=50, description="Client app version")
+    device_id: str | None = Field(default=None, max_length=100, description="Client device identifier")
+    platform: str | None = Field(default="mobile", max_length=50, description="Operating system / platform")
+
+
+class FeedbackSubmitResponse(BaseModel):
+    """Response returned upon feedback submission."""
+    success: bool
+    message: str
+

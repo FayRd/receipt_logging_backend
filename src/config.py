@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     openrouter_vision_model: str = "google/gemini-2.5-flash"
     openrouter_chat_model: str = "google/gemini-2.5-flash"
 
+    # Discord Feedback Webhook
+    discord_feedback_webhook_url: str = ""
+
     # Rate Limiting Configuration
     rate_limit_enabled: bool = True
     rate_limit_scan_per_minute: int = 5           # Heavy Vision AI parsing

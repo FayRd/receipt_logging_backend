@@ -1,4 +1,5 @@
 import json
+import re
 from dataclasses import dataclass
 from pydantic import BaseModel, ConfigDict, Field, field_validator, AliasChoices
 from datetime import datetime, timezone
@@ -183,13 +184,36 @@ class CustomCategorySchema(BaseModel):
 
 class UserCreateRequest(BaseModel):
     """Request body for new user registration."""
-    username: str = Field(..., min_length=3, max_length=50)
+    username: str = Field(..., min_length=3, max_length=10, pattern=r"^[a-zA-Z0-9_]{3,10}$")
     email: str = Field(..., description="Unique email address for account identification and login.")
-    password: str = Field(..., min_length=6)  # Pre-encrypted string from client
+    password: str = Field(..., min_length=8)  # Pre-encrypted string from client
     country_code: str | None = Field(default=None, max_length=10, description="E.164 country dialling code, e.g. +60.")
     mobile_number: str | None = Field(default=None, max_length=20, description="Mobile number without country code.")
     avatar_image_path: str | None = None
     custom_categories: list[CustomCategorySchema] | None = Field(default=None, max_length=8, description="Custom user categories (max 8)")
+
+    @field_validator("email")
+    @classmethod
+    def validate_email(cls, v: str) -> str:
+        s = v.strip().lower()
+        if not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", s):
+            raise ValueError("Invalid email address format.")
+        return s
+
+    @field_validator("password")
+    @classmethod
+    def validate_password_complexity(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters long.")
+        if not re.search(r"[A-Z]", v):
+            raise ValueError("Password must contain at least one uppercase letter.")
+        if not re.search(r"[a-z]", v):
+            raise ValueError("Password must contain at least one lowercase letter.")
+        if not re.search(r"[0-9]", v):
+            raise ValueError("Password must contain at least one digit.")
+        if not re.search(r'[!@#$%^&*(),.?":{}|<>]', v):
+            raise ValueError("Password must contain at least one special character.")
+        return v
 
 
 class UserLoginRequest(BaseModel):
@@ -246,7 +270,22 @@ class PasswordResetOtpRequest(BaseModel):
 class PasswordResetNewRequest(BaseModel):
     """Request body for setting a new password using a single-use reset_token."""
     reset_token: str = Field(..., min_length=10, description="Single-use reset token issued after OTP verification.")
-    new_password: str = Field(..., min_length=6, description="New password.")
+    new_password: str = Field(..., min_length=8, description="New password.")
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password_complexity(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters long.")
+        if not re.search(r"[A-Z]", v):
+            raise ValueError("Password must contain at least one uppercase letter.")
+        if not re.search(r"[a-z]", v):
+            raise ValueError("Password must contain at least one lowercase letter.")
+        if not re.search(r"[0-9]", v):
+            raise ValueError("Password must contain at least one digit.")
+        if not re.search(r'[!@#$%^&*(),.?":{}|<>]', v):
+            raise ValueError("Password must contain at least one special character.")
+        return v
 
 
 # ── CHAT / CONVERSATION SCHEMAS ───────────────────────────────────────────────

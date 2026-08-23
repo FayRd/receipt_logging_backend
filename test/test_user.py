@@ -5,12 +5,13 @@ import uuid
 # ── Helper ─────────────────────────────────────────────────────────────────────
 
 def _unique_user(suffix: str = "") -> dict:
-    """Generate a unique user registration payload."""
-    name = f"user_{uuid.uuid4().hex[:8]}{suffix}"
+    """Generate a unique user registration payload (3-10 chars username, complex password)."""
+    raw_id = uuid.uuid4().hex[:6]
+    name = f"u_{raw_id[:4]}{suffix}"[:10]
     return {
         "username": name,
-        "email": f"{name}@test.example.com",
-        "password": "secure_password",
+        "email": f"{name}_{raw_id}@test.example.com",
+        "password": "Password123!",
     }
 
 
@@ -54,7 +55,7 @@ def test_user_create_duplicate_email(client):
     assert res1.status_code == 201
 
     # Different username, same email
-    payload2 = {**payload, "username": f"other_{uuid.uuid4().hex[:6]}"}
+    payload2 = {**payload, "username": f"u_{uuid.uuid4().hex[:6]}"}
     res2 = client.post("/api/v1/user/create", json=payload2)
     assert res2.status_code == 409
     assert "email" in res2.json()["detail"].lower()
@@ -66,11 +67,23 @@ def test_user_create_short_password(client):
     assert response.status_code == 422
 
 
+def test_user_create_weak_password_no_special(client):
+    payload = {**_unique_user(), "password": "Password123"}
+    response = client.post("/api/v1/user/create", json=payload)
+    assert response.status_code == 422
+
+
+def test_user_create_invalid_username_format(client):
+    payload = {**_unique_user(), "username": "bad user!"}
+    response = client.post("/api/v1/user/create", json=payload)
+    assert response.status_code == 422
+
+
 def test_user_create_missing_email(client):
     """Omitting the mandatory email field should return HTTP 422."""
     response = client.post("/api/v1/user/create", json={
-        "username": f"user_{uuid.uuid4().hex[:6]}",
-        "password": "secure_password",
+        "username": f"u_{uuid.uuid4().hex[:6]}",
+        "password": "Password123!",
     })
     assert response.status_code == 422
 

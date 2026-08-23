@@ -62,9 +62,9 @@ def mock_device(client):
 
 @pytest.fixture(scope="function")
 def mock_user_session(client, mock_device):
-    username = f"test_qa_user_{uuid.uuid4().hex[:6]}"
+    username = f"u_{uuid.uuid4().hex[:6]}"
     email = f"{username}@test.example.com"
-    password = "secret_password_123"
+    password = "SecretPass123!"
     password_hash = UserRepository.hash_password(password)
 
     response = client.post(

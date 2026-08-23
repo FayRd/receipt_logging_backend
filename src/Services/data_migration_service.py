@@ -1,6 +1,8 @@
+import base64
 import uuid
 from supabase import AsyncClient
 from src.Infrastructure.logger import get_logger
+from src.Services.image_service import ImageStorageService
 
 logger = get_logger("Services.data_migration_service")
 
@@ -54,6 +56,7 @@ class DataMigrationService:
             except Exception as exc:
                 logger.warning("Could not query existing receipts for de-duplication: %s", exc)
 
+            storage_service = ImageStorageService(db)
             rows = []
             for item in receipts:
                 item_id = item.get("id")
@@ -68,12 +71,39 @@ class DataMigrationService:
                     if not rcpt_data.get("merchant_name"):
                         rcpt_data["merchant_name"] = "Unknown Merchant"
 
+                receipt_uuid = str(uuid.uuid4())
+                receipt_image_path = None
+
+                # If the guest receipt has an attached base64 image, upload to Supabase Storage
+                image_base64 = item.get("image_base64")
+                if image_base64 and isinstance(image_base64, str):
+                    try:
+                        image_bytes = base64.b64decode(image_base64)
+                        receipt_image_path = await storage_service.upload_receipt_image(
+                            user_id=user_id,
+                            receipt_id=receipt_uuid,
+                            image_bytes=image_bytes,
+                        )
+                        logger.info(
+                            "DataMigrationService: uploaded guest receipt image to storage for user_id=%s, receipt_id=%s → %s",
+                            user_id,
+                            receipt_uuid,
+                            receipt_image_path,
+                        )
+                    except Exception as img_exc:
+                        logger.warning(
+                            "DataMigrationService: failed to upload receipt image during migration for user_id=%s: %s",
+                            user_id,
+                            img_exc,
+                        )
+
                 row: dict = {
+                    "id": receipt_uuid,
                     "user_id": user_id,
                     "device_id": device_name,
                     "receipt": rcpt_data,
+                    "receipt_image_path": receipt_image_path,
                 }
-                # Omit local 'id' so PostgreSQL DEFAULT gen_random_uuid() generates a valid UUID
                 if item.get("created_at"):
                     row["created_at"] = item["created_at"]
                 rows.append(row)

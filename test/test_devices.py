@@ -67,8 +67,8 @@ def test_device_link_requires_all_four_headers(client, mock_device):
 
 
 def test_device_link_success(client, mock_device):
-    username = f"user_{uuid.uuid4().hex[:6]}"
-    password = "secure_password123"
+    username = f"u_{uuid.uuid4().hex[:6]}"
+    password = "Password123!"
     password_hash = UserRepository.hash_password(password)
 
     create_res = client.post("/api/v1/user/create", json={
@@ -128,8 +128,8 @@ def generate_receipt_payload():
 
 def test_device_link_migrates_guest_data(client, mock_device):
     # Create user
-    username = f"user_{uuid.uuid4().hex[:6]}"
-    password = "secure_password"
+    username = f"u_{uuid.uuid4().hex[:6]}"
+    password = "Password123!"
 
     create_res = client.post("/api/v1/user/create", json={
         "username": username,
@@ -195,6 +195,80 @@ def test_device_link_migrates_guest_data(client, mock_device):
 
     # Cleanup user
     user_headers = {"X-User-Name": username, "X-User-Token": password}
+    client.delete("/api/v1/user/me", headers=user_headers)
+
+
+def _sample_jpeg_base64() -> str:
+    import base64
+    import io
+    from PIL import Image
+    img = Image.new("RGB", (32, 32), color=(255, 0, 0))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def test_device_link_migrates_guest_receipt_with_image(client, mock_device):
+    username = f"u_{uuid.uuid4().hex[:6]}"
+    password = "Password123!"
+
+    create_res = client.post("/api/v1/user/create", json={
+        "username": username,
+        "email": f"{username}@test.example.com",
+        "password": password,
+    })
+    assert create_res.status_code == 201
+    user_id = create_res.json()["id"]
+
+    img_b64 = _sample_jpeg_base64()
+
+    migrate_data = {
+        "receipts": [
+            {
+                "id": "res-guest-1770999999",
+                "receipt": {
+                    "merchant_name": "Image Store Test",
+                    "line_items": [
+                        {"description": "Latte", "quantity": 1, "unit_price": 5.50, "total_price": 5.50}
+                    ],
+                    "total_amount": 5.50,
+                    "currency": "USD",
+                    "category": "Dining",
+                    "date": "Aug 23, 2026",
+                    "raw_text": "",
+                    "confidence_score": 0.99,
+                },
+                "image_base64": img_b64,
+                "image_filename": "guest_latte.jpg",
+                "created_at": "2026-08-23T12:00:00Z",
+            }
+        ]
+    }
+
+    link_headers = {
+        "X-Device-Name": mock_device["device_name"],
+        "X-Device-Token": mock_device["device_token"],
+        "X-User-Name": username,
+        "X-User-Token": password,
+    }
+
+    res = client.post("/api/v1/devices/link", json={
+        "device_name": mock_device["device_name"],
+        "username": username,
+        "migrate_data": migrate_data,
+    }, headers=link_headers)
+    assert res.status_code == 200
+
+    user_headers = {"X-User-Name": username, "X-User-Token": password}
+    receipts_res = client.get("/api/v1/receipts/", headers=user_headers)
+    assert receipts_res.status_code == 200
+    receipts_list = receipts_res.json()
+    assert len(receipts_list) >= 1
+    migrated_rcpt = next(r for r in receipts_list if r["receipt"]["merchant_name"] == "Image Store Test")
+    assert migrated_rcpt["receipt_image_path"] is not None
+    assert f"{user_id}/receipt_images/" in migrated_rcpt["receipt_image_path"]
+
+    # Clean up
     client.delete("/api/v1/user/me", headers=user_headers)
 
 

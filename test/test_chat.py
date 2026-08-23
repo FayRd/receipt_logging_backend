@@ -65,8 +65,8 @@ def test_chat_history_unowned(client, mock_user_session):
     conv_id = create_res.json()["id"]
     
     # User B tries to access it
-    user_b_name = f"user_b_{uuid.uuid4().hex[:6]}"
-    password = "password_123"
+    user_b_name = f"u_b_{uuid.uuid4().hex[:5]}"
+    password = "Password123!"
     create_b = client.post("/api/v1/user/create", json={
         "username": user_b_name,
         "email": f"{user_b_name}@test.com",
@@ -173,8 +173,8 @@ def test_delete_chat_unowned(client, mock_user_session):
     conv_id = create_res.json()["id"]
     
     # User B tries to delete it
-    user_b_name = f"user_b_{uuid.uuid4().hex[:6]}"
-    password = "password_123"
+    user_b_name = f"u_b_{uuid.uuid4().hex[:5]}"
+    password = "Password123!"
     create_b = client.post("/api/v1/user/create", json={
         "username": user_b_name,
         "email": f"{user_b_name}@test.com",
@@ -223,8 +223,8 @@ def test_update_chat_title_unowned(client, mock_user_session):
     create_res = client.post("/api/v1/chat/create", headers=mock_user_session["headers"])
     conv_id = create_res.json()["id"]
 
-    user_b_name = f"user_b_{uuid.uuid4().hex[:6]}"
-    password = "password_123"
+    user_b_name = f"u_b_{uuid.uuid4().hex[:5]}"
+    password = "Password123!"
     create_b = client.post("/api/v1/user/create", json={
         "username": user_b_name,
         "email": f"{user_b_name}@test.com",

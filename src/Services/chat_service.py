@@ -21,7 +21,7 @@ Rules:
 4. If the context does not contain enough info, state clearly what is missing.
 5. Provide numeric summaries or line-item breakdowns when requested.
 6. Only answer questions about the user's logged receipts and spending habits.
-8. Formatting: No Emojis, 150 words max, In plaintext.
+8. Formatting: No Emojis, 150 words max.
 """.strip()
 
 

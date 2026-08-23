@@ -3,13 +3,14 @@ import uuid
 
 
 def _unique_user() -> dict:
-    name = f"reset_qa_{uuid.uuid4().hex[:8]}"
+    raw_id = uuid.uuid4().hex[:6]
+    name = f"rst_{raw_id[:5]}"
     return {
         "username": name,
         "email": f"{name}@test.example.com",
-        "password": "old_secure_password_123",
+        "password": "OldPassword123!",
         "country_code": "+60",
-        "mobile_number": f"12{uuid.uuid4().hex[:7]}",
+        "mobile_number": f"12{raw_id[:7]}",
     }
 
 
@@ -84,7 +85,7 @@ def test_end_to_end_password_reset_flow(client):
     reset_token = res_otp.json()["reset_token"]
 
     # Step 3: Set New Password
-    new_pwd = "new_super_secure_password_2026"
+    new_pwd = "NewSecurePass2026!"
     res_new = client.post("/api/v1/user/password-reset-new", json={
         "reset_token": reset_token,
         "new_password": new_pwd,
@@ -124,14 +125,14 @@ def test_reset_token_reuse_rejected(client):
     # First reset works
     res1 = client.post("/api/v1/user/password-reset-new", json={
         "reset_token": reset_token,
-        "new_password": "new_password_step_1",
+        "new_password": "NewPasswordStep1!",
     })
     assert res1.status_code == 200
 
     # Second reset with same token is rejected (single-use)
     res2 = client.post("/api/v1/user/password-reset-new", json={
         "reset_token": reset_token,
-        "new_password": "new_password_step_2",
+        "new_password": "NewPasswordStep2!",
     })
     assert res2.status_code == 400
     assert "Invalid or expired reset token" in res2.json()["detail"]

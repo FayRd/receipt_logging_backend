@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     rag_history_messages_limit: int = 50          # Message turns context window (matches guest limit)
     max_conversations_per_identity: int = 10      # Active conversation hard cap
 
+    # Image Compression & Supabase Storage
+    supabase_user_data_bucket: str = "user-data"          # Supabase Storage bucket ID
+    max_upload_size_bytes: int = 20 * 1024 * 1024         # 20MB raw upload rejection ceiling
+    max_compressed_image_bytes: int = 5 * 1024 * 1024     # 5MB maximum stored image target
+
     # AI Provider Selection
     # Set AI_PROVIDER to "gemini" (default) or "openrouter".
     # Fallback: if AI_PROVIDER is unset but OPENROUTER_API_KEY is provided while GEMINI_API_KEY is

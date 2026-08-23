@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS receipts (
     user_id UUID REFERENCES users(id) ON DELETE CASCADE,
     device_id TEXT NOT NULL,
     receipt JSONB NOT NULL,
+    receipt_image_path TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     deleted_at TIMESTAMPTZ

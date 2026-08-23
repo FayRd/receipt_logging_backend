@@ -116,8 +116,21 @@ class ReceiptRepository:
 
     # ── WRITES ────────────────────────────────────────────────────────────────
 
-    async def create(self, identity: Identity, receipt: Receipt) -> dict:
-        """Insert a single receipt row bound to the caller's identity."""
+    async def create(
+        self,
+        identity: Identity,
+        receipt: Receipt,
+        receipt_image_path: str | None = None,
+        receipt_id: str | None = None,
+    ) -> dict:
+        """Insert a single receipt row bound to the caller's identity.
+
+        Optionally accepts a pre-generated `receipt_id` (UUID string) so that the
+        image can be uploaded before the DB insert using a known receipt ID.
+        `receipt_image_path` is stored alongside the receipt JSONB column.
+        """
+        import uuid as _uuid
+
         start_time = time.perf_counter()
         logger.debug(
             "INSERT receipt create: user_id=%s, device_id=%s, merchant=%s",
@@ -126,11 +139,16 @@ class ReceiptRepository:
             receipt.merchant_name,
         )
         try:
-            row = {
+            row: dict = {
                 "user_id": identity.user_id,
                 "device_id": identity.device_id,
                 "receipt": receipt.model_dump(mode="json"),
             }
+            if receipt_id:
+                row["id"] = receipt_id
+            if receipt_image_path is not None:
+                row["receipt_image_path"] = receipt_image_path
+
             response = await self.db.table(self.TABLE).insert(row).execute()
             created_row = response.data[0]
             duration_ms = (time.perf_counter() - start_time) * 1000
@@ -150,8 +168,19 @@ class ReceiptRepository:
             )
             raise
 
-    async def create_batch(self, identity: Identity, receipts: list[Receipt]) -> list[dict]:
-        """Insert up to 100 receipt rows in a single Supabase call, bound to caller's identity."""
+    async def create_batch(
+        self,
+        identity: Identity,
+        receipts: list[Receipt],
+        receipt_image_paths: list[str | None] | None = None,
+        receipt_ids: list[str | None] | None = None,
+    ) -> list[dict]:
+        """Insert up to 100 receipt rows in a single Supabase call, bound to caller's identity.
+
+        `receipt_image_paths` is an optional parallel list (same length as `receipts`)
+        containing the Supabase Storage path for each receipt image or None if not uploaded.
+        `receipt_ids` is an optional parallel list of pre-generated UUID strings.
+        """
         start_time = time.perf_counter()
         logger.debug(
             "INSERT receipts create_batch: count=%d, user_id=%s, device_id=%s",
@@ -160,14 +189,19 @@ class ReceiptRepository:
             identity.device_id,
         )
         try:
-            rows = [
-                {
+            rows = []
+            for i, r in enumerate(receipts):
+                row: dict = {
                     "user_id": identity.user_id,
                     "device_id": identity.device_id,
                     "receipt": r.model_dump(mode="json"),
                 }
-                for r in receipts
-            ]
+                if receipt_ids and i < len(receipt_ids) and receipt_ids[i]:
+                    row["id"] = receipt_ids[i]
+                if receipt_image_paths and i < len(receipt_image_paths) and receipt_image_paths[i]:
+                    row["receipt_image_path"] = receipt_image_paths[i]
+                rows.append(row)
+
             response = await self.db.table(self.TABLE).insert(rows).execute()
             inserted_rows = response.data if response else []
             duration_ms = (time.perf_counter() - start_time) * 1000
@@ -189,24 +223,38 @@ class ReceiptRepository:
 
     # ── UPDATE ────────────────────────────────────────────────────────────────
 
-    async def update(self, receipt_id: str, identity: Identity, receipt: Receipt) -> dict | None:
-        """Update the receipt payload for a row owned by the caller's identity.
+    async def update(
+        self,
+        receipt_id: str,
+        identity: Identity,
+        receipt: Receipt | None = None,
+        receipt_image_path: str | None = None,
+    ) -> dict | None:
+        """Update the receipt payload and/or receipt_image_path for a row owned by the caller.
 
+        Both `receipt` and `receipt_image_path` are optional — at least one must be provided.
         Returns the updated row dict or None if no row was found/matched.
         """
         start_time = time.perf_counter()
         logger.debug(
-            "UPDATE receipt: receipt_id=%s, user_id=%s, device_id=%s, merchant=%s",
+            "UPDATE receipt: receipt_id=%s, user_id=%s, device_id=%s",
             receipt_id,
             identity.user_id,
             identity.device_id,
-            receipt.merchant_name,
         )
         try:
             now = datetime.now(timezone.utc).isoformat()
+            updates: dict = {"updated_at": now}
+            if receipt is not None:
+                updates["receipt"] = receipt.model_dump(mode="json")
+                logger.debug("UPDATE receipt: updating receipt JSON for receipt_id=%s", receipt_id)
+            if receipt_image_path is not None:
+                updates["receipt_image_path"] = receipt_image_path
+                logger.debug("UPDATE receipt: updating receipt_image_path=%s", receipt_image_path)
+
             query = (
                 self.db.table(self.TABLE)
-                .update({"receipt": receipt.model_dump(mode="json"), "updated_at": now})
+                .update(updates)
                 .eq("id", receipt_id)
                 .is_("deleted_at", "null")
             )

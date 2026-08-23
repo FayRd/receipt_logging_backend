@@ -131,6 +131,7 @@ class ReceiptRecord(BaseModel):
     user_id: str | None = None
     device_id: str
     receipt: Receipt
+    receipt_image_path: str | None = None
     created_at: datetime
     updated_at: datetime | None = None
     deleted_at: datetime | None = None
@@ -156,9 +157,12 @@ class ReceiptUpdateRequest(BaseModel):
     """Request body for updating an existing receipt record via PATCH.
 
     Identity (user_id) is resolved server-side from session headers.
-    Only the receipt payload is updated; ownership metadata is immutable.
+    Only non-None fields are updated; ownership metadata is immutable.
+    Accepts both JSON and multipart/form-data (receipt_image_path is set server-side
+    after image upload).
     """
-    receipt: Receipt
+    receipt: Receipt | None = None
+    receipt_image_path: str | None = None
 
 
 class HealthResponse(BaseModel):

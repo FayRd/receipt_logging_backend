@@ -8,7 +8,7 @@ from src.Models.schemas import UserCreateRequest, UserUpdateRequest
 logger = get_logger("Models.user_repository")
 
 # Columns returned in all sanitized (non-auth) user fetches
-_USER_SAFE_COLUMNS = "id, username, email, country_code, mobile_number, avatar_image_path, custom_categories, created_at, deleted_at"
+_USER_SAFE_COLUMNS = "id, username, email, country_code, mobile_number, avatar_image_path, custom_categories, preferences, created_at, deleted_at"
 
 
 
@@ -192,6 +192,7 @@ class UserRepository:
                 "mobile_number": req.mobile_number,
                 "avatar_image_path": req.avatar_image_path,
                 "custom_categories": cats,
+                "preferences": req.preferences if req.preferences is not None else {},
             }
             res = await self.db.table(self.TABLE).insert(row).execute()
             user_data = res.data[0]
@@ -223,6 +224,8 @@ class UserRepository:
                     c.model_dump(by_alias=True) if hasattr(c, "model_dump") else c
                     for c in req.custom_categories
                 ]
+            if req.preferences is not None:
+                updates["preferences"] = req.preferences
 
             if not updates:
                 logger.debug("No fields provided to update_profile for user_id=%s; fetching profile", user_id)

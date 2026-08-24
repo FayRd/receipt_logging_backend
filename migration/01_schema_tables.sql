@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS users (
     mobile_number TEXT,
     avatar_image_path TEXT,
     custom_categories JSONB DEFAULT '[]'::jsonb,
+    preferences JSONB DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     deleted_at TIMESTAMPTZ

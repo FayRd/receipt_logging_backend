@@ -257,6 +257,10 @@ async def get_my_avatar(
                                 "type": "string",
                                 "description": "JSON array of custom category objects (max 8)",
                             },
+                            "preferences_json": {
+                                "type": "string",
+                                "description": "JSON object of user UI and currency preferences",
+                            },
                         },
                     }
                 },
@@ -320,7 +324,7 @@ async def update_my_profile(
                 except Exception:
                     pass
 
-        # 3. Parse custom categories
+        # 3. Parse custom categories and preferences
         cats = None
         cats_raw = form.get("custom_categories_json") or form.get("custom_categories")
         if cats_raw is not None:
@@ -330,6 +334,23 @@ async def update_my_profile(
                     cats = [CustomCategorySchema(**c) for c in json.loads(cats_str)]
                 except Exception as exc:
                     raise HTTPException(status_code=422, detail=f"Invalid custom_categories_json: {exc}") from exc
+
+        prefs = None
+        prefs_raw = form.get("preferences_json") or form.get("preferences")
+        if prefs_raw is not None:
+            if isinstance(prefs_raw, dict):
+                prefs = prefs_raw
+            else:
+                prefs_str = _clean_str(str(prefs_raw))
+                if prefs_str:
+                    try:
+                        loaded_prefs = json.loads(prefs_str)
+                        if isinstance(loaded_prefs, dict):
+                            prefs = loaded_prefs
+                    except Exception as exc:
+                        raise HTTPException(status_code=422, detail=f"Invalid preferences_json: {exc}") from exc
+        elif "preferences" in parsed_body_dict and isinstance(parsed_body_dict["preferences"], dict):
+            prefs = parsed_body_dict["preferences"]
 
         # 4. Resolve update fields
         email_val = _clean_str(form.get("email")) or parsed_body_dict.get("email")
@@ -347,6 +368,7 @@ async def update_my_profile(
             mobile_number=mobile_val,
             avatar_image_path=avatar_path_val,
             custom_categories=cats,
+            preferences=prefs,
         )
     else:
         # Default JSON parsing
@@ -385,6 +407,7 @@ async def update_my_profile(
             mobile_number=update_req.mobile_number,
             avatar_image_path=folder_path,
             custom_categories=update_req.custom_categories,
+            preferences=update_req.preferences,
         )
         logger.info(
             "update_my_profile: avatar uploaded → %s for user_id=%s",

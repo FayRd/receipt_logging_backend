@@ -1,6 +1,7 @@
 import json
 import re
 from dataclasses import dataclass
+from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator, AliasChoices
 from datetime import datetime, timezone
 
@@ -191,6 +192,7 @@ class UserCreateRequest(BaseModel):
     mobile_number: str | None = Field(default=None, max_length=20, description="Mobile number without country code.")
     avatar_image_path: str | None = None
     custom_categories: list[CustomCategorySchema] | None = Field(default=None, max_length=8, description="Custom user categories (max 8)")
+    preferences: dict[str, Any] | None = Field(default=None, description="User UI and spending preferences dictionary.")
 
     @field_validator("email")
     @classmethod
@@ -231,6 +233,7 @@ class UserRecord(BaseModel):
     mobile_number: str | None = None
     avatar_image_path: str | None = None
     custom_categories: list[CustomCategorySchema] = Field(default_factory=list)
+    preferences: dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime | None = None
     deleted_at: datetime | None = None
@@ -246,6 +249,7 @@ class UserUpdateRequest(BaseModel):
     mobile_number: str | None = Field(default=None, max_length=20)
     avatar_image_path: str | None = None
     custom_categories: list[CustomCategorySchema] | None = Field(default=None, max_length=8)
+    preferences: dict[str, Any] | None = Field(default=None, description="User UI and spending preferences dictionary.")
 
 
 class UserLoginResponse(BaseModel):

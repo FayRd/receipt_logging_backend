@@ -7,6 +7,7 @@ from src.Infrastructure.logger import get_logger
 from src.Models.Devices.device_repository import DeviceRepository
 from src.Models.Users.user_repository import UserRepository
 from src.Auth.device_security import hash_device_token
+from src.Auth.jwt_token import verify_jwt_token
 
 logger = get_logger("Auth.identity")
 
@@ -106,25 +107,46 @@ get_current_identity = get_device_identity
 
 # ── 2. USER AUTHENTICATED IDENTITY (/user/*, /receipts/*, /chat/*) ─────────────
 async def get_user_identity(
-    x_user_name: str = Header(
-        ...,
-        alias="X-User-Name",
-        description="Authenticated username string.",
+    authorization: str | None = Header(
+        None,
+        alias="Authorization",
+        description="Standard Bearer <JWT_ACCESS_TOKEN> authentication header.",
     ),
-    x_user_token: str = Header(
-        ...,
+    x_user_name: str | None = Header(
+        None,
+        alias="X-User-Name",
+        description="Authenticated username string (legacy header).",
+    ),
+    x_user_token: str | None = Header(
+        None,
         alias="X-User-Token",
-        description="Authenticated user password hash token string.",
+        description="Authenticated user password token string (legacy header).",
     ),
     db: AsyncClient = Depends(get_supabase_client),
 ) -> Identity:
     """FastAPI dependency for user-scoped routes (/user/*, /receipts/*, /chat/*).
 
-    Requires X-User-Name and X-User-Token headers. Omits X-Device-Name and X-Device-Token.
-    Verifies user credentials against stored password hash in constant time.
+    Accepts standard 'Authorization: Bearer <token>' header (preferred, fast 0-query JWT check)
+    or legacy X-User-Name + X-User-Token headers for backward compatibility.
     """
-    clean_username = x_user_name.strip()
-    clean_user_token = x_user_token.strip()
+    # 1. Primary: JWT Bearer Token validation
+    if authorization and authorization.strip().lower().startswith("bearer "):
+        bearer_token = authorization.strip()[7:].strip()
+        payload = verify_jwt_token(bearer_token, expected_type="access")
+        user_id = payload.get("sub")
+        username = payload.get("username", "")
+        identity = Identity(
+            user_id=user_id,
+            username=username,
+            device_id="",
+            device_name="",
+        )
+        logger.debug("Identity resolved via JWT Bearer: user_id=%s, username=%s", user_id, username)
+        return identity
+
+    # 2. Legacy: Header-based password hash verification
+    clean_username = x_user_name.strip() if x_user_name else ""
+    clean_user_token = x_user_token.strip() if x_user_token else ""
 
     logger.debug(
         "Parsing user headers: X-User-Name/X-User-ID='%s', X-User-Token='%s'",
@@ -134,8 +156,9 @@ async def get_user_identity(
 
     if not clean_username or not clean_user_token:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="X-User-Name and X-User-Token headers are required and cannot be empty.",
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required. Provide 'Authorization: Bearer <token>' or user credentials.",
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
     user_repo = UserRepository(db)
@@ -145,6 +168,7 @@ async def get_user_identity(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User account not found or invalid credentials.",
+            headers={"WWW-Authenticate": "Bearer"},
         )
 
     stored_password_hash = user.get("password", "")
@@ -155,6 +179,7 @@ async def get_user_identity(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid user authentication token.",
+            headers={"WWW-Authenticate": "Bearer"},
         )
     logger.debug("Constant-time digest comparison PASS for user token (username='%s')", clean_username)
 
@@ -176,6 +201,7 @@ require_user_identity = get_user_identity
 async def require_link_bridge_identity(
     x_device_name: str = Header(..., alias="X-Device-Name"),
     x_device_token: str = Header(..., alias="X-Device-Token"),
+    authorization: str | None = Header(None, alias="Authorization"),
     x_user_name: str | None = Header(None, alias="X-User-Name"),
     x_user_token: str | None = Header(None, alias="X-User-Token"),
     db: AsyncClient = Depends(get_supabase_client),
@@ -183,16 +209,18 @@ async def require_link_bridge_identity(
     """FastAPI dependency for POST /devices/link:
 
     Requires X-Device-Name and X-Device-Token to verify device identity.
-    If X-User-Name and X-User-Token are present, also verifies user credentials (for linking).
+    If Authorization Bearer JWT or (X-User-Name and X-User-Token) are present,
+    also verifies user credentials (for linking).
     Allows device-only authorization for unlinking (when user headers are omitted).
     """
     clean_device_name = x_device_name.strip() if x_device_name else ""
     clean_device_token = x_device_token.strip() if x_device_token else ""
 
     logger.debug(
-        "Parsing link bridge headers: X-Device-Name/X-Device-ID='%s', X-Device-Token='%s', X-User-Name/X-User-ID='%s', X-User-Token='%s'",
+        "Parsing link bridge headers: X-Device-Name/X-Device-ID='%s', X-Device-Token='%s', Authorization='%s', X-User-Name/X-User-ID='%s', X-User-Token='%s'",
         clean_device_name,
         "[PRESENT]" if clean_device_token else "[EMPTY]",
+        "[BEARER]" if authorization else "[NONE]",
         x_user_name,
         "[PRESENT]" if x_user_token else "[NONE]",
     )
@@ -222,10 +250,16 @@ async def require_link_bridge_identity(
         )
     logger.debug("Constant-time digest comparison PASS for link bridge device token (device_name='%s')", clean_device_name)
 
-    # 2. Verify User Identity if user credentials headers are provided
+    # 2. Verify User Identity if user credentials or JWT Bearer are provided
     db_user_id = device.get("user_id")
     db_username = None
-    if x_user_name and x_user_token:
+    if authorization and authorization.strip().lower().startswith("bearer "):
+        bearer_token = authorization.strip()[7:].strip()
+        payload = verify_jwt_token(bearer_token, expected_type="access")
+        db_user_id = payload.get("sub")
+        db_username = payload.get("username", "")
+        logger.debug("Link bridge user identity resolved via JWT Bearer: user_id=%s, username=%s", db_user_id, db_username)
+    elif x_user_name and x_user_token:
         clean_username = x_user_name.strip()
         clean_user_token = x_user_token.strip()
 
@@ -275,6 +309,7 @@ async def get_scoped_identity(
         alias="X-Request-Type",
         description="Request mode: 'user' or 'guest'. Determines which credential headers are required.",
     ),
+    authorization: str | None = Header(None, alias="Authorization"),
     x_device_name: str | None = Header(None, alias="X-Device-Name"),
     x_device_token: str | None = Header(None, alias="X-Device-Token"),
     x_user_name: str | None = Header(None, alias="X-User-Name"),
@@ -288,7 +323,7 @@ async def get_scoped_identity(
         - Must omit: X-User-Name, X-User-Token
 
     X-Request-Type: 'user'
-        - Requires: X-User-Name, X-User-Token
+        - Requires: Authorization Bearer JWT OR (X-User-Name + X-User-Token)
         - Must omit: X-Device-Name, X-Device-Token
     """
     req_type = x_request_type.strip().lower()
@@ -304,10 +339,10 @@ async def get_scoped_identity(
 
     if req_type == "guest":
         # User credential headers must be absent to prevent header confusion
-        if x_user_name or x_user_token:
+        if x_user_name or x_user_token or authorization:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="For X-Request-Type 'guest', user headers (X-User-Name, X-User-Token) must be omitted.",
+                detail="For X-Request-Type 'guest', user headers (Authorization, X-User-Name, X-User-Token) must be omitted.",
             )
         if not x_device_name or not x_device_token:
             raise HTTPException(
@@ -361,10 +396,28 @@ async def get_scoped_identity(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="For X-Request-Type 'user', device headers (X-Device-Name, X-Device-Token) must be omitted.",
             )
+
+        # 1. Primary: JWT Bearer validation
+        if authorization and authorization.strip().lower().startswith("bearer "):
+            bearer_token = authorization.strip()[7:].strip()
+            payload = verify_jwt_token(bearer_token, expected_type="access")
+            user_id = payload.get("sub")
+            username = payload.get("username", "")
+            identity = Identity(
+                user_id=user_id,
+                username=username,
+                device_id="",
+                device_name="",
+            )
+            logger.debug("Identity resolved via JWT Bearer (mode=user): user_id=%s, username=%s", user_id, username)
+            return identity
+
+        # 2. Legacy fallback: X-User-Name + X-User-Token
         if not x_user_name or not x_user_token:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="For X-Request-Type 'user', X-User-Name and X-User-Token headers are required.",
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="For X-Request-Type 'user', Authorization Bearer token or (X-User-Name and X-User-Token) is required.",
+                headers={"WWW-Authenticate": "Bearer"},
             )
         # Delegate to user identity verification (reuses existing logic)
         clean_username = x_user_name.strip()
@@ -375,6 +428,7 @@ async def get_scoped_identity(
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="User account not found or invalid credentials.",
+                headers={"WWW-Authenticate": "Bearer"},
             )
         stored_password_hash = user.get("password", "")
         incoming_user_hash = UserRepository.hash_password(clean_user_token)
@@ -383,6 +437,7 @@ async def get_scoped_identity(
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid user authentication token.",
+                headers={"WWW-Authenticate": "Bearer"},
             )
         logger.debug("Constant-time digest comparison PASS for user token (username='%s')", clean_username)
 
@@ -405,6 +460,9 @@ async def get_scoped_identity(
 # ── 4. SSE STREAMING IDENTITY ──────────────────────────────────────────────────
 async def get_sse_identity(
     x_request_type: str | None = Header(None, alias="X-Request-Type", description="Request mode: 'user' or 'guest'"),
+    authorization: str | None = Header(None, alias="Authorization", description="Standard Bearer <JWT> token"),
+    token: str | None = Query(None, alias="token", description="JWT access token parameter for EventSource connections"),
+    access_token: str | None = Query(None, alias="access_token", description="JWT access token parameter for EventSource connections"),
     x_device_name: str | None = Header(None, alias="X-Device-Name", description="Mobile hardware/variant device name identifier string"),
     x_device_token: str | None = Header(None, alias="X-Device-Token", description="Device secret fingerprint token"),
     x_user_name: str | None = Header(None, alias="X-User-Name", description="Authenticated username"),
@@ -418,6 +476,28 @@ async def get_sse_identity(
 ) -> Identity:
     """FastAPI dependency for SSE endpoints supporting both User and Guest modes via HTTP Headers or URL Query Parameters."""
     req_type = (x_request_type or "").strip().lower()
+
+    # 1. JWT Bearer / Query Token resolution for User mode
+    jwt_raw = None
+    if authorization and authorization.strip().lower().startswith("bearer "):
+        jwt_raw = authorization.strip()[7:].strip()
+    elif token and token.strip():
+        jwt_raw = token.strip()
+    elif access_token and access_token.strip():
+        jwt_raw = access_token.strip()
+
+    if jwt_raw:
+        payload = verify_jwt_token(jwt_raw, expected_type="access")
+        user_id = payload.get("sub")
+        username_val = payload.get("username", "")
+        identity = Identity(
+            user_id=user_id,
+            username=username_val,
+            device_id="",
+            device_name="",
+        )
+        logger.debug("Identity resolved via JWT for SSE: user_id=%s, username=%s", user_id, username_val)
+        return identity
 
     device_name = (
         x_device_name
@@ -465,7 +545,7 @@ async def get_sse_identity(
         if not username or not user_token:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="User authentication required via headers (X-User-Name, X-User-Token) or query parameters (username, user_token).",
+                detail="User authentication required via Authorization header, token query, or credentials.",
             )
         user_repo = UserRepository(db)
         user = await user_repo.get_by_identifier(username)

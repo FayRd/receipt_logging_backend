@@ -78,6 +78,10 @@ async def request_trace_logging_middleware(request: Request, call_next):
         response = await call_next(request)
         duration_ms = (time.perf_counter() - start_time) * 1000.0
         response.headers["X-Request-ID"] = req_id
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         logger.info(
             f"<-- {response.status_code} {request.method} {request.url.path} ({duration_ms:.2f}ms)"
         )

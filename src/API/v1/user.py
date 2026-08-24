@@ -17,10 +17,13 @@ from src.Models.schemas import (
     PasswordResetInitiateRequest,
     PasswordResetOtpRequest,
     PasswordResetNewRequest,
+    TokenRefreshRequest,
+    TokenRefreshResponse,
 )
 from src.Models.Users.user_repository import UserRepository
 from src.Models.Users.password_reset_repository import PasswordResetRepository
 from src.Services.image_service import ImageStorageService, validate_image_size
+from src.Auth.jwt_token import create_access_token, create_refresh_token, verify_jwt_token
 from src.config import get_settings
 
 router = APIRouter(prefix="/user", tags=["Users"])
@@ -109,7 +112,66 @@ async def login_user(
 
     user.pop("password", None)
     logger.info("User logged in successfully: user_id=%s, username=%s", user.get("id"), user.get("username"))
-    return UserLoginResponse(success=True, user=user, message="Login successful.")
+
+    # Issue cryptographically signed JWT tokens
+    access_token = create_access_token(user_id=user["id"], username=user["username"])
+    refresh_token = create_refresh_token(user_id=user["id"], username=user["username"])
+    expires_in_sec = _settings.jwt_access_token_expire_minutes * 60
+
+    return UserLoginResponse(
+        success=True,
+        user=user,
+        message="Login successful.",
+        access_token=access_token,
+        refresh_token=refresh_token,
+        token_type="bearer",
+        expires_in=expires_in_sec,
+    )
+
+
+# ── POST /user/refresh ────────────────────────────────────────────────────────
+@router.post(
+    "/refresh",
+    response_model=TokenRefreshResponse,
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_auth_per_minute))],
+)
+async def refresh_user_token(
+    body: TokenRefreshRequest,
+    repo: UserRepository = Depends(get_repo),
+):
+    """Rotate JWT session tokens using a valid refresh token.
+
+    Validates signature, expiration, and token type.
+    Issues a new access token and rotated refresh token.
+    """
+    logger.debug("Entering refresh_user_token")
+    payload = verify_jwt_token(body.refresh_token, expected_type="refresh")
+    user_id = payload.get("sub")
+    username = payload.get("username", "")
+
+    user = await repo.get_by_id(user_id)
+    if not user:
+        logger.warning("Token refresh failed: User account %s no longer exists", user_id)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="User account not found or session terminated.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Issue fresh rotated tokens
+    new_access_token = create_access_token(user_id=user["id"], username=user["username"])
+    new_refresh_token = create_refresh_token(user_id=user["id"], username=user["username"])
+    expires_in_sec = _settings.jwt_access_token_expire_minutes * 60
+
+    logger.info("Token refresh successful for user_id=%s, username=%s", user["id"], user["username"])
+    return TokenRefreshResponse(
+        success=True,
+        access_token=new_access_token,
+        refresh_token=new_refresh_token,
+        token_type="bearer",
+        expires_in=expires_in_sec,
+        user=user,
+    )
 
 
 # ── GET /user/me ──────────────────────────────────────────────────────────────
@@ -421,8 +483,7 @@ async def initiate_password_reset(
     logger.info("Password reset initiation completed for identifier='%s'", clean_identifier)
     return {
         "success": True,
-        "message": "If an account with this email/mobile exists, a reset code has been sent.",
-        "dev_otp": dev_otp,
+        "message": "If an account with this email or mobile number exists, a verification code has been sent.",
     }
 
 

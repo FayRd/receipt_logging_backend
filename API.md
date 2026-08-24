@@ -12,11 +12,12 @@ This document lists all endpoints available in **Receipt Logging Backend v1**, i
 
 | Endpoint Category | Mandatory Headers | Payload / Mode Notes |
 | :--- | :--- | :--- |
-| **Public** (`/health/`, `POST /user/create`, `POST /user/login`, `POST /user/reset-password-*`, `POST /devices/register`) | *None* | No authentication required. |
-| **Device / Guest** (`GET /devices/me`, `DELETE /devices/me`) | `X-Device-Name`, `X-Device-Token` | Hardware device variant name & token. |
-| **User Scoped** (`GET/DELETE /user/me`, `/receipts/*`) | `X-User-Name`, `X-User-Token` | User credentials (`X-User-Token` is plaintext password, hashed server-side). |
-| **Link Bridge** (`POST /devices/link`) | `X-Device-Name`, `X-Device-Token`, `X-User-Name`, `X-User-Token` | Requires **all 4 headers**. Device token removed from JSON body. |
-| **Scoped** (`/scan/*`, `POST /chat/query`) | `X-Request-Type` + Mode Headers | **`X-Request-Type: "guest"`**: Requires `X-Device-Name` + `X-Device-Token` (user headers must be omitted).<br>**`X-Request-Type: "user"`**: Requires `X-User-Name` + `X-User-Token` (device headers must be omitted). |
+| **Public** (`/health/`, `POST /user/create`, `POST /user/login`, `POST /user/refresh`, `POST /user/reset-password-*`, `POST /devices/register`) | *None* | No authentication required. |
+| **Device / Guest** (`GET /devices/me`, `DELETE /devices/me`, `POST /devices/rotate-token`) | `X-Device-Name`, `X-Device-Token` | Hardware device variant name & secret token verified in constant time. |
+| **User Scoped** (`GET/PATCH/DELETE /user/me`, `/receipts/*`, `/chat/*`) | `Authorization: Bearer <access_token>` *(Recommended)*<br>**OR** `X-User-Name` + `X-User-Token` *(Legacy)* | Standard signed JWT access token (fast 0-query check) or legacy password token credentials. |
+| **Link Bridge** (`POST /devices/link`) | `X-Device-Name`, `X-Device-Token`, plus `Authorization: Bearer <access_token>` (or `X-User-Name` + `X-User-Token`) | Links device to authenticated user account. Unlinking requires only device headers. |
+| **Dual-Scoped** (`/scan/*`, `POST /chat/query`) | `X-Request-Type` + Mode Credentials | **`X-Request-Type: "guest"`**: Requires `X-Device-Name` + `X-Device-Token`.<br>**`X-Request-Type: "user"`**: Requires `Authorization: Bearer <access_token>` (or legacy `X-User-Name` + `X-User-Token`). |
+| **SSE Streaming** (`GET /scan/parse-many/{batch_id}/stream`) | Headers or Query Params | **Guest**: `X-Device-Name` + `X-Device-Token` or `?device_name=...&device_token=...`<br>**User**: `Authorization: Bearer <token>` or `?token=<access_token>`. |
 
 ---
 
@@ -302,7 +303,7 @@ Register a new user account.
 ---
 
 ### `POST /api/v1/user/login`
-Authenticate user credentials using username or email.
+Authenticate user credentials using username or email. Returns signed JWT tokens and user record.
 
 - **Request Body**: `UserLoginRequest`
   ```json
@@ -312,21 +313,57 @@ Authenticate user credentials using username or email.
   }
   ```
 - **Response Schema** (`200 OK`): `UserLoginResponse`
+  ```json
+  {
+    "access_token": "eyJhbGciOiJIUzI1NiIsIn...",
+    "refresh_token": "eyJhbGciOiJIUzI1NiIsIn...",
+    "token_type": "bearer",
+    "user": {
+      "id": "usr-uuid-1234",
+      "username": "johndoe",
+      "email": "johndoe@example.com",
+      "country_code": "+60",
+      "mobile_number": "123456789",
+      "avatar_image_path": null,
+      "custom_categories": [],
+      "preferences": {}
+    }
+  }
+  ```
+
+---
+
+### `POST /api/v1/user/refresh`
+Rotates/refreshes an expired JWT access token using a valid refresh token.
+
+- **Request Body**:
+  ```json
+  {
+    "refresh_token": "eyJhbGciOiJIUzI1NiIsIn..."
+  }
+  ```
+- **Response Schema** (`200 OK`):
+  ```json
+  {
+    "access_token": "eyJhbGciOiJIUzI1NiIsIn...",
+    "token_type": "bearer"
+  }
+  ```
 
 ---
 
 ### `GET /api/v1/user/me`
 Get current user profile.
 
-- **Required Headers**: `X-User-Name`, `X-User-Token`
+- **Required Headers**: `Authorization: Bearer <access_token>` *(Recommended)* or `X-User-Name` + `X-User-Token` *(Legacy)*
 - **Response Schema** (`200 OK`): `UserRecord`
 
 ---
 
 ### `PATCH /api/v1/user/me`
-Update user profile fields (email, country code, mobile number, avatar).
+Update user profile fields (email, country code, mobile number, avatar, custom categories, preferences).
 
-- **Required Headers**: `X-User-Name`, `X-User-Token`
+- **Required Headers**: `Authorization: Bearer <access_token>` *(Recommended)* or `X-User-Name` + `X-User-Token` *(Legacy)*
 - **Request Body**: `UserUpdateRequest`
 - **Response Schema** (`200 OK`): `UserRecord`
 
@@ -335,7 +372,7 @@ Update user profile fields (email, country code, mobile number, avatar).
 ### `DELETE /api/v1/user/me`
 Soft-delete current user account.
 
-- **Required Headers**: `X-User-Name`, `X-User-Token`
+- **Required Headers**: `Authorization: Bearer <access_token>` *(Recommended)* or `X-User-Name` + `X-User-Token` *(Legacy)*
 - **Response Schema** (`200 OK`):
   ```json
   {

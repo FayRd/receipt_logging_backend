@@ -90,16 +90,12 @@ def rate_limit(max_requests_getter, window_seconds: int = 60):
             else max_requests_getter
         )
 
-        # Derive rate limiting key: X-Device-Name header if present, else client host IP
-        device_name = (
-            request.headers.get("X-Device-Name")
-            or request.headers.get("X-Device-ID")
-            or ""
-        ).strip()
+        # Derive rate limiting key: Anchor fundamentally on client IP, optionally scoped by authenticated identity
         client_ip = request.client.host if request.client else "127.0.0.1"
-        key_identifier = device_name if device_name else client_ip
-        key = f"{request.url.path}:{key_identifier}"
-        logger.debug("Rate limit key generated: '%s' (identifier='%s', path='%s')", key, key_identifier, request.url.path)
+        auth_header = request.headers.get("Authorization", "").strip()
+        auth_tag = f"auth:{hash(auth_header)}" if auth_header else ""
+        key = f"{request.url.path}:{client_ip}" + (f":{auth_tag}" if auth_tag else "")
+        logger.debug("Rate limit key generated: '%s' (ip='%s', path='%s')", key, client_ip, request.url.path)
 
         is_allowed, remaining, retry_after = await limiter.check_rate_limit(
             key=key, max_requests=max_requests, window_seconds=window_seconds

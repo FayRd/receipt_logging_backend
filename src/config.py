@@ -80,6 +80,12 @@ class Settings(BaseSettings):
     data_encryption_key: str = "dGVzdC1zZWNyZXQtZW5jcnlwdGlvbi1rZXktMzJieXRlcw=="
     enforce_data_encryption: bool = True
 
+    # JWT Authentication Configuration
+    jwt_secret_key: str = ""
+    jwt_algorithm: str = "HS256"
+    jwt_access_token_expire_minutes: int = 15
+    jwt_refresh_token_expire_days: int = 30
+
     @property
     def effective_ai_provider(self) -> str:
         """Return the resolved AI provider ("gemini" or "openrouter").

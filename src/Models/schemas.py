@@ -252,6 +252,25 @@ class UserLoginResponse(BaseModel):
     success: bool
     user: UserRecord
     message: str
+    access_token: str | None = None
+    refresh_token: str | None = None
+    token_type: str = "bearer"
+    expires_in: int | None = None
+
+
+class TokenRefreshRequest(BaseModel):
+    """Request body for rotating JWT session tokens."""
+    refresh_token: str = Field(..., description="Valid JWT refresh token.")
+
+
+class TokenRefreshResponse(BaseModel):
+    """Response containing fresh JWT access and rotated refresh tokens."""
+    success: bool
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    user: UserRecord
 
 
 # ── PASSWORD RESET SCHEMAS ───────────────────────────────────────────────────

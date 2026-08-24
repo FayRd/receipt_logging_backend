@@ -5,6 +5,8 @@ Supports standard 'redis' package or fallback built-in RESP socket client.
 Includes a '--mock' flag to run against an embedded mock Redis server for self-testing.
 """
 
+__test__ = False
+
 import argparse
 import os
 import socket

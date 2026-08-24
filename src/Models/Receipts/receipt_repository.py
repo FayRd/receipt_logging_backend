@@ -2,6 +2,7 @@ import time
 from datetime import datetime, timezone
 from supabase import AsyncClient
 from src.Infrastructure.logger import get_logger
+from src.Infrastructure.crypto import get_crypto_engine
 from src.Models.schemas import Receipt
 from src.Auth.identity import Identity
 
@@ -13,6 +14,7 @@ class ReceiptRepository:
 
     def __init__(self, db: AsyncClient):
         self.db = db
+        self.crypto = get_crypto_engine()
 
     # ── INTERNAL HELPERS ──────────────────────────────────────────────────────
 
@@ -60,6 +62,9 @@ class ReceiptRepository:
 
             response = await query.execute()
             rows = response.data if response else []
+            for row in rows:
+                if "receipt" in row and row["receipt"] is not None:
+                    row["receipt"] = self.crypto.decrypt_json(row["receipt"])
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "SELECT receipts get_all_by_identity succeeded: returned %d rows in %.2fms",
@@ -96,6 +101,8 @@ class ReceiptRepository:
             query = self._apply_identity_filter(query, identity)
             response = await query.maybe_single().execute()
             result = response.data if response else None
+            if result and "receipt" in result and result["receipt"] is not None:
+                result["receipt"] = self.crypto.decrypt_json(result["receipt"])
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "SELECT receipt get_by_id finished: found=%s in %.2fms",
@@ -142,7 +149,7 @@ class ReceiptRepository:
             row: dict = {
                 "user_id": identity.user_id,
                 "device_id": identity.device_id,
-                "receipt": receipt.model_dump(mode="json"),
+                "receipt": self.crypto.encrypt_json(receipt.model_dump(mode="json")),
             }
             if receipt_id:
                 row["id"] = receipt_id
@@ -151,6 +158,8 @@ class ReceiptRepository:
 
             response = await self.db.table(self.TABLE).insert(row).execute()
             created_row = response.data[0]
+            if "receipt" in created_row and created_row["receipt"] is not None:
+                created_row["receipt"] = self.crypto.decrypt_json(created_row["receipt"])
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "INSERT receipt create succeeded: id=%s in %.2fms",
@@ -194,7 +203,7 @@ class ReceiptRepository:
                 row: dict = {
                     "user_id": identity.user_id,
                     "device_id": identity.device_id,
-                    "receipt": r.model_dump(mode="json"),
+                    "receipt": self.crypto.encrypt_json(r.model_dump(mode="json")),
                 }
                 if receipt_ids and i < len(receipt_ids) and receipt_ids[i]:
                     row["id"] = receipt_ids[i]
@@ -204,6 +213,9 @@ class ReceiptRepository:
 
             response = await self.db.table(self.TABLE).insert(rows).execute()
             inserted_rows = response.data if response else []
+            for row in inserted_rows:
+                if "receipt" in row and row["receipt"] is not None:
+                    row["receipt"] = self.crypto.decrypt_json(row["receipt"])
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "INSERT receipts create_batch succeeded: inserted %d rows in %.2fms",
@@ -246,7 +258,7 @@ class ReceiptRepository:
             now = datetime.now(timezone.utc).isoformat()
             updates: dict = {"updated_at": now}
             if receipt is not None:
-                updates["receipt"] = receipt.model_dump(mode="json")
+                updates["receipt"] = self.crypto.encrypt_json(receipt.model_dump(mode="json"))
                 logger.debug("UPDATE receipt: updating receipt JSON for receipt_id=%s", receipt_id)
             if receipt_image_path is not None:
                 updates["receipt_image_path"] = receipt_image_path
@@ -261,6 +273,8 @@ class ReceiptRepository:
             query = self._apply_identity_filter(query, identity)
             response = await query.execute()
             updated_row = response.data[0] if (response and response.data) else None
+            if updated_row and "receipt" in updated_row and updated_row["receipt"] is not None:
+                updated_row["receipt"] = self.crypto.decrypt_json(updated_row["receipt"])
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "UPDATE receipt finished: receipt_id=%s, found=%s in %.2fms",

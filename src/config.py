@@ -76,6 +76,10 @@ class Settings(BaseSettings):
     log_level: str = "DEBUG"
     enable_console_logging: bool = True
 
+    # Data Encryption at Rest (AES-256-GCM)
+    data_encryption_key: str = "dGVzdC1zZWNyZXQtZW5jcnlwdGlvbi1rZXktMzJieXRlcw=="
+    enforce_data_encryption: bool = True
+
     @property
     def effective_ai_provider(self) -> str:
         """Return the resolved AI provider ("gemini" or "openrouter").

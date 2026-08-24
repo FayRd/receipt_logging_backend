@@ -8,6 +8,7 @@ from fastapi import HTTPException
 from supabase import AsyncClient
 
 from src.Infrastructure.logger import get_logger
+from src.Infrastructure.crypto import get_crypto_engine, CryptoEngine
 
 logger = get_logger("Services.image_service")
 
@@ -163,11 +164,17 @@ def generate_avatar_resolutions(
 # ── Storage Service ───────────────────────────────────────────────────────────
 
 class ImageStorageService:
-    """Handles uploading compressed images to Supabase Storage in the `user-data` bucket."""
+    """Handles uploading compressed and encrypted images to Supabase Storage in the `user-data` bucket."""
 
-    def __init__(self, db: AsyncClient, bucket: str = "user-data"):
+    def __init__(
+        self,
+        db: AsyncClient,
+        bucket: str = "user-data",
+        crypto: CryptoEngine | None = None,
+    ):
         self.db = db
         self.bucket = bucket
+        self.crypto = crypto or get_crypto_engine()
 
     async def upload_avatar(
         self,
@@ -210,27 +217,29 @@ class ImageStorageService:
         image_bytes: bytes,
         target_max_bytes: int = 5 * 1024 * 1024,
     ) -> str:
-        """Compress and upload a receipt image to {user_id}/receipt_images/{receipt_id}.jpg.
+        """Compress and encrypt a receipt image with AES-256-GCM to {user_id}/receipt_images/{receipt_id}.jpg.
 
         Returns the full storage path for storage in receipts.receipt_image_path.
         """
         compressed = compress_receipt_image(image_bytes, target_max_bytes=target_max_bytes)
+        encrypted_bytes = self.crypto.encrypt_bytes(compressed)
         path = f"{user_id}/receipt_images/{receipt_id}.jpg"
 
         logger.debug(
-            "ImageStorageService.upload_receipt_image: uploading %s (%d bytes) to bucket=%s",
+            "ImageStorageService.upload_receipt_image: uploading encrypted %s (%d raw -> %d encrypted bytes) to bucket=%s",
             path,
             len(compressed),
+            len(encrypted_bytes),
             self.bucket,
         )
         await self.db.storage.from_(self.bucket).upload(
             path=path,
-            file=compressed,
+            file=encrypted_bytes,
             file_options={"content-type": "image/jpeg", "upsert": "true"},
         )
 
         logger.info(
-            "ImageStorageService.upload_receipt_image: receipt_id=%s → %s",
+            "ImageStorageService.upload_receipt_image: receipt_id=%s → %s (encrypted at rest)",
             receipt_id,
             path,
         )
@@ -264,7 +273,7 @@ class ImageStorageService:
             return None
 
     async def download_receipt_image(self, storage_path: str) -> bytes | None:
-        """Download a receipt image from Supabase Storage given its storage_path."""
+        """Download and decrypt a receipt image from Supabase Storage given its storage_path."""
         if not storage_path:
             return None
         try:
@@ -273,11 +282,14 @@ class ImageStorageService:
                 storage_path,
                 self.bucket,
             )
-            data = await self.db.storage.from_(self.bucket).download(storage_path)
-            return data
+            raw_data = await self.db.storage.from_(self.bucket).download(storage_path)
+            if raw_data:
+                decrypted = self.crypto.decrypt_bytes(raw_data)
+                return decrypted
+            return None
         except Exception as e:
             logger.warning(
-                "ImageStorageService.download_receipt_image: image not found at %s: %s",
+                "ImageStorageService.download_receipt_image: error downloading/decrypting %s: %s",
                 storage_path,
                 e,
             )

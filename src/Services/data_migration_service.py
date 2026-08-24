@@ -2,6 +2,7 @@ import base64
 import uuid
 from supabase import AsyncClient
 from src.Infrastructure.logger import get_logger
+from src.Infrastructure.crypto import get_crypto_engine
 from src.Services.image_service import ImageStorageService
 
 logger = get_logger("Services.data_migration_service")
@@ -30,6 +31,7 @@ class DataMigrationService:
         migrate_data: dict,
     ) -> dict:
         """Insert guest data into Supabase tables linked to user_id (skipping existing UUIDs)."""
+        crypto = get_crypto_engine()
         receipts: list[dict] = migrate_data.get("receipts", []) or []
         conversations: list[dict] = migrate_data.get("conversations", []) or []
         chat_messages: list[dict] = migrate_data.get("chat_messages", []) or []
@@ -97,11 +99,12 @@ class DataMigrationService:
                             img_exc,
                         )
 
+                enc_rcpt = crypto.encrypt_json(rcpt_data) if isinstance(rcpt_data, dict) else rcpt_data
                 row: dict = {
                     "id": receipt_uuid,
                     "user_id": user_id,
                     "device_id": device_name,
-                    "receipt": rcpt_data,
+                    "receipt": enc_rcpt,
                     "receipt_image_path": receipt_image_path,
                 }
                 if item.get("created_at"):
@@ -138,10 +141,11 @@ class DataMigrationService:
                     continue
 
                 orig_ids.append(item_id)
+                raw_title = item.get("title", "Untitled Chat") or "Untitled Chat"
                 row = {
                     "user_id": user_id,
                     "device_id": device_name,
-                    "title": item.get("title", "Untitled Chat"),
+                    "title": crypto.encrypt_text(raw_title),
                 }
                 if item.get("created_at"):
                     row["created_at"] = item["created_at"]
@@ -179,10 +183,11 @@ class DataMigrationService:
                     logger.debug("Skipping message with unmapped orig_conv_id=%s", orig_conv_id)
                     continue  # Skip messages whose parent conversation wasn't mapped
 
+                raw_content = item.get("content", "") or ""
                 row = {
                     "conversation_id": new_conv_id,
                     "sender": item.get("sender", "user"),
-                    "content": item.get("content", ""),
+                    "content": crypto.encrypt_text(raw_content),
                 }
                 if item.get("created_at"):
                     row["created_at"] = item["created_at"]

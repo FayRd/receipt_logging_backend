@@ -10,6 +10,7 @@ import redis.asyncio as aioredis
 from google import genai
 from src.config import get_settings
 from src.Infrastructure.logger import setup_logging, get_logger, set_request_id
+from src.Infrastructure.database import get_supabase_client, close_supabase_client
 from src.API.v1 import health, scan, receipts, user, devices, chat, help
 
 # Initialize centralized logging
@@ -37,9 +38,16 @@ async def lifespan(app: FastAPI):
     # Pass redis client to scan router module
     scan.init_redis_client(redis_client)
 
+    # Pre-warm Supabase async client singleton
+    try:
+        await get_supabase_client()
+    except Exception as e:
+        logger.warning(f"Failed to pre-warm Supabase client during startup: {e}")
+
     yield
 
     logger.info("Shutting down Receipt API")
+    await close_supabase_client()
     if redis_client:
         await redis_client.aclose()
 

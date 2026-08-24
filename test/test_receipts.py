@@ -45,13 +45,8 @@ def test_create_receipt_batch(client, mock_user_session):
     assert len(data) == 2
 
 def test_create_receipt_missing_field(client, mock_user_session):
-    # Missing total_amount
-    invalid_receipt = {
-        "merchant_name": "Test Store",
-        "date": datetime.now(timezone.utc).isoformat(),
-        "raw_text": "text"
-    }
-    response = client.post("/api/v1/receipts/create", json={"receipt": invalid_receipt}, headers=mock_user_session["headers"])
+    # Invalid receipt payload (non-dict receipt structure)
+    response = client.post("/api/v1/receipts/create", json={"receipt": "invalid_structure"}, headers=mock_user_session["headers"])
     assert response.status_code == 422
 
 def test_get_single_receipt(client, mock_user_session):

@@ -2,6 +2,7 @@ import time
 from datetime import datetime, timezone
 from supabase import AsyncClient
 from src.Infrastructure.logger import get_logger
+from src.Infrastructure.crypto import get_crypto_engine
 from src.Auth.identity import Identity
 
 logger = get_logger("Models.conversation_repository")
@@ -14,6 +15,7 @@ class ConversationRepository:
 
     def __init__(self, db: AsyncClient):
         self.db = db
+        self.crypto = get_crypto_engine()
 
     # ── IDENTITY FILTER ───────────────────────────────────────────────────────
 
@@ -69,6 +71,8 @@ class ConversationRepository:
             q = self._apply_identity_filter(q, identity)
             res = await q.maybe_single().execute()
             result = res.data if res else None
+            if result and "title" in result and result["title"] is not None:
+                result["title"] = self.crypto.decrypt_text(result["title"])
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "SELECT conversation get_conversation finished: found=%s in %.2fms",
@@ -101,10 +105,12 @@ class ConversationRepository:
             row = {
                 "user_id": identity.user_id,
                 "device_id": identity.device_id,
-                "title": clean_title,
+                "title": self.crypto.encrypt_text(clean_title),
             }
             res = await self.db.table(self.CONVERSATIONS_TABLE).insert(row).execute()
             created_row = res.data[0]
+            if "title" in created_row and created_row["title"] is not None:
+                created_row["title"] = self.crypto.decrypt_text(created_row["title"])
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "INSERT conversation create_conversation succeeded: id=%s in %.2fms",
@@ -142,6 +148,9 @@ class ConversationRepository:
                 .execute()
             )
             rows = res.data if res else []
+            for row in rows:
+                if "title" in row and row["title"] is not None:
+                    row["title"] = self.crypto.decrypt_text(row["title"])
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "SELECT conversations list_conversations succeeded: returned %d rows in %.2fms",
@@ -175,13 +184,15 @@ class ConversationRepository:
             now = datetime.now(timezone.utc).isoformat()
             q = (
                 self.db.table(self.CONVERSATIONS_TABLE)
-                .update({"title": clean_title, "updated_at": now})
+                .update({"title": self.crypto.encrypt_text(clean_title), "updated_at": now})
                 .eq("id", conversation_id)
                 .is_("deleted_at", "null")
             )
             q = self._apply_identity_filter(q, identity)
             res = await q.execute()
             result = res.data[0] if res and res.data else None
+            if result and "title" in result and result["title"] is not None:
+                result["title"] = self.crypto.decrypt_text(result["title"])
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "UPDATE conversation update_title finished: conversation_id=%s, found=%s in %.2fms",
@@ -232,6 +243,9 @@ class ConversationRepository:
                 .execute()
             )
             rows = res.data if res else []
+            for row in rows:
+                if "content" in row and row["content"] is not None:
+                    row["content"] = self.crypto.decrypt_text(row["content"])
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "SELECT chat_messages get_messages succeeded: returned %d/%d rows in %.2fms",
@@ -264,10 +278,12 @@ class ConversationRepository:
             row = {
                 "conversation_id": conversation_id,
                 "sender": sender,
-                "content": content,
+                "content": self.crypto.encrypt_text(content),
             }
             res = await self.db.table(self.MESSAGES_TABLE).insert(row).execute()
             created_row = res.data[0]
+            if "content" in created_row and created_row["content"] is not None:
+                created_row["content"] = self.crypto.decrypt_text(created_row["content"])
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "INSERT chat_messages add_message succeeded: id=%s in %.2fms",

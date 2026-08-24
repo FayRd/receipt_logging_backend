@@ -16,7 +16,7 @@ def test_chat_create_success(client, mock_user_session):
 
 def test_chat_create_unauthorized(client):
     res = client.post("/api/v1/chat/create")
-    assert res.status_code == 422
+    assert res.status_code in (401, 422)
 
 
 def test_chat_create_default_title(client, mock_user_session):

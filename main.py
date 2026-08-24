@@ -29,6 +29,14 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     logger.info(f"Starting Receipt API in {settings.environment} mode (Logging: {settings.enable_file_logging})")
 
+    # Production secrets verification guardrail
+    if settings.environment == "production":
+        default_dev_key = "dGVzdC1zZWNyZXQtZW5jcnlwdGlvbi1rZXktMzJieXRlcw=="
+        if settings.data_encryption_key == default_dev_key:
+            raise RuntimeError("CRITICAL: Production startup aborted: DATA_ENCRYPTION_KEY is using default placeholder key.")
+        if not settings.jwt_secret_key:
+            raise RuntimeError("CRITICAL: Production startup aborted: JWT_SECRET_KEY is empty in production environment.")
+
     # Initialize Async Redis client
     redis_client = aioredis.from_url(settings.redis_connection_string, decode_responses=True)
 

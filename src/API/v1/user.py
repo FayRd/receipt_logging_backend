@@ -460,31 +460,36 @@ async def initiate_password_reset(
             otp=otp_str,
         )
 
-        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        log_line = f"[{now_str}] [OTP] Reset code for '{clean_identifier}' (User: {user.get('username')}, ID: {user.get('id')}): {otp_str}\n"
-        print(f"🔑 {log_line.strip()}")
-        try:
-            with open("otp_dev.log", "a", encoding="utf-8") as f:
-                f.write(log_line)
-        except Exception:
-            pass
+        if _settings.environment == "development":
+            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            log_line = f"[{now_str}] [OTP] Reset code for '{clean_identifier}' (User: {user.get('username')}, ID: {user.get('id')}): {otp_str}\n"
+            print(f"🔑 {log_line.strip()}")
+            try:
+                with open("otp_dev.log", "a", encoding="utf-8") as f:
+                    f.write(log_line)
+            except Exception:
+                pass
         logger.info("Password reset code generated for user_id=%s (identifier='%s')", user.get("id"), clean_identifier)
     else:
-        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        warn_line = f"[{now_str}] ⚠️ [OTP WARNING] Account not found for identifier: '{clean_identifier}'. dev_otp is null.\n"
-        print(warn_line.strip())
-        try:
-            with open("otp_dev.log", "a", encoding="utf-8") as f:
-                f.write(warn_line)
-        except Exception:
-            pass
+        if _settings.environment == "development":
+            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+            warn_line = f"[{now_str}] ⚠️ [OTP WARNING] Account not found for identifier: '{clean_identifier}'. dev_otp is null.\n"
+            print(warn_line.strip())
+            try:
+                with open("otp_dev.log", "a", encoding="utf-8") as f:
+                    f.write(warn_line)
+            except Exception:
+                pass
         logger.warning("Password reset initiated for non-existent identifier='%s'", clean_identifier)
 
     logger.info("Password reset initiation completed for identifier='%s'", clean_identifier)
-    return {
+    response_payload: dict[str, object] = {
         "success": True,
         "message": "If an account with this email or mobile number exists, a verification code has been sent.",
     }
+    if _settings.environment == "development":
+        response_payload["dev_otp"] = dev_otp
+    return response_payload
 
 
 # ── POST /user/reset-password-otp ────────────────────────────────────────────

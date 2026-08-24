@@ -13,9 +13,9 @@ def test_unauthorized_unregistered_device_id(client, invalid_headers):
     response = client.get("/api/v1/devices/me", headers=invalid_headers)
     assert response.status_code == 401
 
-def test_invalid_json_structure(client, mock_device):
+def test_invalid_json_structure(client, mock_user_session):
     # Completely invalid structure for POST /receipts/
-    response = client.post("/api/v1/receipts/create", json={"completely_wrong": "structure"}, headers=mock_device["headers"])
+    response = client.post("/api/v1/receipts/create", json={"completely_wrong": "structure"}, headers=mock_user_session["headers"])
     assert response.status_code == 422
 
 

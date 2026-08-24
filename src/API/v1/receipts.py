@@ -232,14 +232,14 @@ async def create_receipt(
         # JSON mode
         try:
             body_dict = await request.json()
-            if isinstance(body_dict, dict) and "receipt" in body_dict:
+            if isinstance(body_dict, dict) and "receipt" in body_dict and isinstance(body_dict["receipt"], dict):
                 receipt = Receipt(**body_dict["receipt"])
                 receipt_image_path = body_dict.get("receipt_image_path")
-            elif isinstance(body_dict, dict):
+            elif isinstance(body_dict, dict) and any(k in body_dict for k in ("merchant_name", "total_amount", "merchant", "amount", "currency", "line_items")):
                 receipt = Receipt(**body_dict)
                 receipt_image_path = body_dict.get("receipt_image_path")
             else:
-                raise ValueError("Expected JSON object")
+                raise ValueError("Payload must contain a 'receipt' object or valid receipt fields.")
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             raise HTTPException(status_code=422, detail=f"Invalid JSON request body: {exc}") from exc
 

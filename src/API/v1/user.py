@@ -1,4 +1,5 @@
 import json
+import math
 import secrets
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -17,6 +18,7 @@ from src.Models.schemas import (
     PasswordResetInitiateRequest,
     PasswordResetOtpRequest,
     PasswordResetNewRequest,
+    ChangePasswordRequest,
     TokenRefreshRequest,
     TokenRefreshResponse,
 )
@@ -581,4 +583,82 @@ async def complete_password_reset(
         "success": True,
         "message": msg,
     }
+
+
+# ── POST /user/change-password ───────────────────────────────────────────────
+@router.post(
+    "/change-password",
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_auth_per_minute))],
+)
+async def change_password(
+    body: ChangePasswordRequest,
+    identity: Identity = Depends(get_user_identity),
+    repo: UserRepository = Depends(get_repo),
+):
+    """Change account password for an authenticated user.
+
+    Requires current session authentication, verifies old password against stored hash,
+    enforces password complexity, and strictly requires new_password != old_password.
+    """
+    logger.debug("Entering change_password for user_id=%s", identity.user_id)
+    if not identity.is_authenticated or not identity.user_id:
+        raise HTTPException(status_code=401, detail="Authentication required to change password.")
+
+    user = await repo.get_by_id_with_password(identity.user_id)
+    if not user:
+        logger.warning("Password change failed: user_id=%s not found", identity.user_id)
+        raise HTTPException(status_code=404, detail="User account not found.")
+
+    # 0. Enforce 7-day rate-limiting cooldown per user
+    user_prefs = user.get("preferences") or {}
+    last_changed_str = user_prefs.get("password_changed_at")
+    if last_changed_str:
+        try:
+            last_changed = datetime.fromisoformat(last_changed_str.replace("Z", "+00:00"))
+            elapsed_seconds = (datetime.now(timezone.utc) - last_changed).total_seconds()
+            cooldown_seconds = 7 * 86400  # 7 days = 604,800 seconds
+            if elapsed_seconds < cooldown_seconds:
+                remaining_seconds = cooldown_seconds - elapsed_seconds
+                days_remaining = max(1, math.ceil(remaining_seconds / 86400))
+                day_word = "day" if days_remaining == 1 else "days"
+                logger.warning(
+                    "Password change rate-limited for user_id=%s: %d %s remaining in 7-day cooldown",
+                    identity.user_id, days_remaining, day_word
+                )
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Password can only be changed once every 7 days. Change allowed in {days_remaining} {day_word}.",
+                )
+        except (ValueError, TypeError):
+            pass
+
+    # 1. Verify old password
+    old_hash = repo.hash_password(body.old_password)
+    if old_hash != user.get("password"):
+        logger.warning("Password change failed for user_id=%s: Incorrect old password", identity.user_id)
+        raise HTTPException(status_code=400, detail="Current password is incorrect.")
+
+    # 2. Reject if new password matches old password
+    if body.new_password == body.old_password:
+        logger.warning("Password change rejected for user_id=%s: new password equals old password", identity.user_id)
+        raise HTTPException(status_code=400, detail="New password cannot be the same as your old password.")
+
+    # 3. Hash, record cooldown timestamp, and update
+    now_iso = datetime.now(timezone.utc).isoformat()
+    updated_prefs = dict(user_prefs)
+    updated_prefs["password_changed_at"] = now_iso
+
+    new_hash = repo.hash_password(body.new_password)
+    success = await repo.update_password(identity.user_id, new_hash, updated_preferences=updated_prefs)
+    if not success:
+        logger.error("Failed to update password in database for user_id=%s", identity.user_id)
+        raise HTTPException(status_code=500, detail="Failed to update password.")
+
+    logger.info("Password changed successfully for user_id=%s", identity.user_id)
+    return {
+        "success": True,
+        "message": "Password changed successfully.",
+        "password_changed_at": now_iso,
+    }
+
 

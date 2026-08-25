@@ -305,3 +305,58 @@ class UserRepository:
             logger.error("Database error in soft_delete user_id=%s after %.2fms: %s", user_id, duration_ms, e, exc_info=True)
             raise e
 
+    # ── PASSWORD MANAGEMENT ───────────────────────────────────────────────────
+
+    async def get_by_id_with_password(self, user_id: str) -> dict | None:
+        """Fetch raw user row including password hash for authentication / password verification."""
+        start_time = time.perf_counter()
+        logger.debug("SELECT user get_by_id_with_password: user_id=%s", user_id)
+        try:
+            res = await (
+                self.db.table(self.TABLE)
+                .select("*")
+                .eq("id", user_id)
+                .is_("deleted_at", "null")
+                .maybe_single()
+                .execute()
+            )
+            result = res.data if res else None
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.info("SELECT user get_by_id_with_password finished: found=%s in %.2fms", result is not None, duration_ms)
+            return result
+        except Exception as e:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.error("Database error in SELECT user get_by_id_with_password user_id=%s after %.2fms: %s", user_id, duration_ms, e, exc_info=True)
+            raise
+
+    async def update_password(
+        self,
+        user_id: str,
+        new_password_hash: str,
+        updated_preferences: dict | None = None,
+    ) -> bool:
+        """Update password hash and optional preferences for an active user."""
+        start_time = time.perf_counter()
+        logger.debug("UPDATE user password: user_id=%s, has_preferences=%s", user_id, updated_preferences is not None)
+        try:
+            updates: dict = {"password": new_password_hash}
+            if updated_preferences is not None:
+                updates["preferences"] = updated_preferences
+
+            res = await (
+                self.db.table(self.TABLE)
+                .update(updates)
+                .eq("id", user_id)
+                .is_("deleted_at", "null")
+                .execute()
+            )
+            success = bool(res and res.data and len(res.data) > 0)
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.info("UPDATE user password succeeded for user_id=%s in %.2fms (success=%s)", user_id, duration_ms, success)
+            return success
+        except Exception as e:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.error("Database error in UPDATE user password user_id=%s after %.2fms: %s", user_id, duration_ms, e, exc_info=True)
+            raise
+
+

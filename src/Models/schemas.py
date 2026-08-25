@@ -311,6 +311,27 @@ class PasswordResetNewRequest(BaseModel):
         return v
 
 
+class ChangePasswordRequest(BaseModel):
+    """Request body for authenticated password change via POST /user/change-password."""
+    old_password: str = Field(..., min_length=1, description="Current account password.")
+    new_password: str = Field(..., min_length=8, description="New account password (min 8 characters).")
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_change_password_complexity(cls, v: str) -> str:
+        if len(v) < 8:
+            raise ValueError("Password must be at least 8 characters long.")
+        if not re.search(r"[A-Z]", v):
+            raise ValueError("Password must contain at least one uppercase letter.")
+        if not re.search(r"[a-z]", v):
+            raise ValueError("Password must contain at least one lowercase letter.")
+        if not re.search(r"[0-9]", v):
+            raise ValueError("Password must contain at least one digit.")
+        if not re.search(r'[!@#$%^&*(),.?":{}|<>]', v):
+            raise ValueError("Password must contain at least one special character.")
+        return v
+
+
 # ── CHAT / CONVERSATION SCHEMAS ───────────────────────────────────────────────
 
 class ConversationCreateRequest(BaseModel):

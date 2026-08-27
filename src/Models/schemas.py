@@ -1,7 +1,7 @@
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, AliasChoices
 from datetime import datetime, timezone
 
@@ -234,6 +234,9 @@ class UserRecord(BaseModel):
     avatar_image_path: str | None = None
     custom_categories: list[CustomCategorySchema] = Field(default_factory=list)
     preferences: dict[str, Any] = Field(default_factory=dict)
+    email_verified_at: datetime | None = None
+    mobile_verified_at: datetime | None = None
+    tier: str = "free"
     created_at: datetime
     updated_at: datetime | None = None
     deleted_at: datetime | None = None
@@ -330,6 +333,21 @@ class ChangePasswordRequest(BaseModel):
         if not re.search(r'[!@#$%^&*(),.?":{}|<>]', v):
             raise ValueError("Password must contain at least one special character.")
         return v
+
+
+# ── EMAIL / MOBILE VERIFICATION SCHEMAS ──────────────────────────────────────
+
+class VerifyInitiateRequest(BaseModel):
+    """Request body for initiating email verification via OTP."""
+    type: Literal["email", "mobile"] = "email"
+    identifier: str = Field(..., min_length=3, max_length=255, description="Email address to verify.")
+
+
+class VerifyCompleteRequest(BaseModel):
+    """Request body for completing email verification by submitting the OTP."""
+    type: Literal["email", "mobile"] = "email"
+    identifier: str = Field(..., min_length=3, max_length=255, description="Email address being verified.")
+    otp: str = Field(..., min_length=6, max_length=6, description="6-digit numeric OTP code.")
 
 
 # ── CHAT / CONVERSATION SCHEMAS ───────────────────────────────────────────────

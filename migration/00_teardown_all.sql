@@ -49,6 +49,7 @@ DROP FUNCTION IF EXISTS update_conversation_updated_at();
 DROP FUNCTION IF EXISTS enforce_max_conversations();
 
 -- 5. Drop Indexes
+DROP INDEX IF EXISTS idx_users_email_verified;
 DROP INDEX IF EXISTS idx_forget_password_token;
 DROP INDEX IF EXISTS idx_forget_password_user;
 DROP INDEX IF EXISTS idx_conversations_guest_migration;
@@ -70,3 +71,6 @@ DROP TABLE IF EXISTS conversations CASCADE;
 DROP TABLE IF EXISTS receipts CASCADE;
 DROP TABLE IF EXISTS devices CASCADE;
 DROP TABLE IF EXISTS users CASCADE;
+
+-- 7. Drop Custom Types
+DROP TYPE IF EXISTS user_tier CASCADE;

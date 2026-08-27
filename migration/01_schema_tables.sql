@@ -1,6 +1,13 @@
 -- 01_schema_tables.sql
 -- Idempotent schema initialization for all 6 database tables
 
+-- 0. Custom Types
+DO $$ BEGIN
+    CREATE TYPE user_tier AS ENUM ('free', 'premium', 'dev');
+EXCEPTION
+    WHEN duplicate_object THEN null;
+END $$;
+
 -- 1. Users Table
 CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -12,6 +19,9 @@ CREATE TABLE IF NOT EXISTS users (
     avatar_image_path TEXT,
     custom_categories JSONB DEFAULT '[]'::jsonb,
     preferences JSONB DEFAULT '{}'::jsonb,
+    email_verified_at TIMESTAMPTZ,
+    mobile_verified_at TIMESTAMPTZ,
+    tier user_tier NOT NULL DEFAULT 'free',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     deleted_at TIMESTAMPTZ

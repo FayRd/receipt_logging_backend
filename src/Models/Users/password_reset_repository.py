@@ -1,11 +1,15 @@
 # File: src/Models/Users/password_reset_repository.py
 
 import hashlib
+import json
 import secrets
 import uuid
 from datetime import datetime, timezone, timedelta
 from supabase import AsyncClient
 from postgrest.exceptions import APIError
+from src.Infrastructure.logger import get_logger
+
+logger = get_logger("Models.password_reset")
 
 
 class PasswordResetRepository:
@@ -67,14 +71,7 @@ class PasswordResetRepository:
             res = await self.db.table(self.TABLE).insert(row).execute()
             return res.data[0] if res.data else row
         except Exception as err:
-            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-            err_msg = f"[{now_str}] ❌ [DB ERROR] Supabase insert into 'forget_password' failed: {err}\n"
-            print(err_msg.strip())
-            try:
-                with open("otp_dev.log", "a", encoding="utf-8") as f:
-                    f.write(err_msg)
-            except Exception:
-                pass
+            logger.error("Supabase insert into 'forget_password' failed for user_id=%s: %s (falling back to memory store)", user_id, err)
 
             # Fallback to memory store if database table is pending migration or RLS policy restricts insertion
             for item in self._memory_store:
@@ -207,13 +204,41 @@ class PasswordResetRepository:
 
         user_id = record["user_id"]
 
-        # Update user's password in users table
-        await (
-            self.db.table(self.USERS_TABLE)
-            .update({"password": new_password_hash})
-            .eq("id", user_id)
-            .execute()
-        )
+        # Update user's password and preferences['password_changed_at'] in users table
+        try:
+            user_res = await (
+                self.db.table(self.USERS_TABLE)
+                .select("preferences")
+                .eq("id", user_id)
+                .maybe_single()
+                .execute()
+            )
+            raw_prefs = (user_res.data.get("preferences") if user_res and user_res.data else {}) or {}
+            if isinstance(raw_prefs, str):
+                try:
+                    prefs = json.loads(raw_prefs)
+                except Exception:
+                    prefs = {}
+            elif isinstance(raw_prefs, dict):
+                prefs = dict(raw_prefs)
+            else:
+                prefs = {}
+
+            prefs["password_changed_at"] = now
+            await (
+                self.db.table(self.USERS_TABLE)
+                .update({"password": new_password_hash, "preferences": prefs})
+                .eq("id", user_id)
+                .execute()
+            )
+        except Exception as e:
+            logger.error("Failed to update preferences on reset completion for user_id=%s: %s", user_id, e)
+            await (
+                self.db.table(self.USERS_TABLE)
+                .update({"password": new_password_hash})
+                .eq("id", user_id)
+                .execute()
+            )
 
         record["is_used"] = True
 
@@ -228,3 +253,31 @@ class PasswordResetRepository:
             pass
 
         return True, "Password reset successfully. You can now log in."
+
+    async def get_latest_reset_timestamp(self, user_id: str) -> str | None:
+        """Fetch the most recent completed (is_used=True) reset timestamp for a user.
+
+        Used as a fallback for 7-day password cooldown enforcement.
+        """
+        try:
+            res = await (
+                self.db.table(self.TABLE)
+                .select("created_at")
+                .eq("user_id", user_id)
+                .eq("is_used", True)
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            if res.data and len(res.data) > 0:
+                return res.data[0].get("created_at")
+        except Exception as e:
+            logger.debug("Failed to query forget_password table for user_id=%s: %s", user_id, e)
+
+        # Fallback to in-memory store
+        for item in reversed(self._memory_store):
+            if item.get("user_id") == user_id and item.get("is_used") is True:
+                return item.get("created_at")
+
+        return None
+

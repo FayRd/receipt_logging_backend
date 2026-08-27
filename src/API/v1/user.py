@@ -21,6 +21,8 @@ from src.Models.schemas import (
     ChangePasswordRequest,
     TokenRefreshRequest,
     TokenRefreshResponse,
+    VerifyInitiateRequest,
+    VerifyCompleteRequest,
 )
 from src.Models.Users.user_repository import UserRepository
 from src.Models.Users.password_reset_repository import PasswordResetRepository
@@ -464,57 +466,88 @@ async def initiate_password_reset(
     """Initiate a password reset flow via email address or mobile number.
 
     Returns HTTP 200 regardless of whether the account exists (prevents account enumeration).
-    In development mode, logs the generated 6-digit OTP to terminal and includes dev_otp in JSON.
+    If in active 7-day cooldown, dispatches a Cooldown Advisory Email via Mailtrap SMTP.
+    Otherwise, generates a secure 6-digit OTP and dispatches a password reset email via Mailtrap SMTP.
     """
+    from src.Services.email_service import send_password_reset_email, send_password_reset_cooldown_email
+
     clean_identifier = body.identifier.strip()
     logger.debug("Entering initiate_password_reset: identifier=%s", clean_identifier)
     user = await user_repo.get_by_email_or_mobile(clean_identifier)
 
-    dev_otp = None
     if user:
-        otp_num = secrets.randbelow(900_000) + 100_000
-        otp_str = str(otp_num)
-        dev_otp = otp_str
-
         email_val = user.get("email")
-        mobile_val = user.get("mobile_number")
-        await reset_repo.create_reset_request(
-            user_id=user["id"],
-            email=email_val,
-            mobile_number=mobile_val,
-            otp=otp_str,
-        )
+        username = user.get("username", "User")
 
-        if _settings.environment == "development":
-            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-            log_line = f"[{now_str}] [OTP] Reset code for '{clean_identifier}' (User: {user.get('username')}, ID: {user.get('id')}): {otp_str}\n"
-            print(f"🔑 {log_line.strip()}")
+        # 0. Check 7-day password cooldown
+        user_prefs = user.get("preferences")
+        if isinstance(user_prefs, str):
             try:
-                with open("otp_dev.log", "a", encoding="utf-8") as f:
-                    f.write(log_line)
+                user_prefs = json.loads(user_prefs)
             except Exception:
+                user_prefs = {}
+        elif not isinstance(user_prefs, dict):
+            user_prefs = {}
+
+        last_changed_str = user_prefs.get("password_changed_at")
+        if not last_changed_str:
+            # Fallback to forget_password table's latest completed reset
+            last_changed_str = await reset_repo.get_latest_reset_timestamp(user["id"])
+
+        in_cooldown = False
+        countdown_str = ""
+        if last_changed_str:
+            try:
+                last_changed = datetime.fromisoformat(str(last_changed_str).replace("Z", "+00:00"))
+                elapsed_seconds = (datetime.now(timezone.utc) - last_changed).total_seconds()
+                cooldown_seconds = 7 * 86400  # 7 days
+                if elapsed_seconds < cooldown_seconds:
+                    in_cooldown = True
+                    remaining_seconds = int(cooldown_seconds - elapsed_seconds)
+                    remaining_days = remaining_seconds // 86400
+                    remaining_hours = (remaining_seconds % 86400) // 3600
+                    day_word = "day" if remaining_days == 1 else "days"
+                    hour_word = "hour" if remaining_hours == 1 else "hours"
+                    countdown_str = f"{remaining_days} {day_word} & {remaining_hours} {hour_word}"
+            except (ValueError, TypeError):
                 pass
-        logger.info("Password reset code generated for user_id=%s (identifier='%s')", user.get("id"), clean_identifier)
+
+        if in_cooldown:
+            logger.warning(
+                "Password reset requested during active cooldown for user_id=%s: %s remaining",
+                user.get("id"),
+                countdown_str,
+            )
+            if email_val:
+                await send_password_reset_cooldown_email(
+                    to_email=email_val,
+                    countdown_str=countdown_str,
+                    username=username,
+                )
+        else:
+            otp_num = secrets.randbelow(900_000) + 100_000
+            otp_str = str(otp_num)
+
+            mobile_val = user.get("mobile_number")
+            await reset_repo.create_reset_request(
+                user_id=user["id"],
+                email=email_val,
+                mobile_number=mobile_val,
+                otp=otp_str,
+            )
+
+            if email_val:
+                await send_password_reset_email(to_email=email_val, otp=otp_str, username=username)
+
+            logger.info("Password reset code generated and dispatched for user_id=%s (identifier='%s')", user.get("id"), clean_identifier)
     else:
-        if _settings.environment == "development":
-            now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-            warn_line = f"[{now_str}] ⚠️ [OTP WARNING] Account not found for identifier: '{clean_identifier}'. dev_otp is null.\n"
-            print(warn_line.strip())
-            try:
-                with open("otp_dev.log", "a", encoding="utf-8") as f:
-                    f.write(warn_line)
-            except Exception:
-                pass
         logger.warning("Password reset initiated for non-existent identifier='%s'", clean_identifier)
 
     logger.info("Password reset initiation completed for identifier='%s'", clean_identifier)
-    response_payload: dict[str, object] = {
+    return {
         "success": True,
         "message": "If an account with this email or mobile number exists, a verification code has been sent.",
     }
-    if _settings.environment == "development":
-        response_payload["dev_otp"] = dev_otp
-    return response_payload
 
 
 # ── POST /user/reset-password-otp ────────────────────────────────────────────
@@ -610,11 +643,19 @@ async def change_password(
         raise HTTPException(status_code=404, detail="User account not found.")
 
     # 0. Enforce 7-day rate-limiting cooldown per user
-    user_prefs = user.get("preferences") or {}
+    user_prefs = user.get("preferences")
+    if isinstance(user_prefs, str):
+        try:
+            user_prefs = json.loads(user_prefs)
+        except Exception:
+            user_prefs = {}
+    elif not isinstance(user_prefs, dict):
+        user_prefs = {}
+
     last_changed_str = user_prefs.get("password_changed_at")
     if last_changed_str:
         try:
-            last_changed = datetime.fromisoformat(last_changed_str.replace("Z", "+00:00"))
+            last_changed = datetime.fromisoformat(str(last_changed_str).replace("Z", "+00:00"))
             elapsed_seconds = (datetime.now(timezone.utc) - last_changed).total_seconds()
             cooldown_seconds = 7 * 86400  # 7 days = 604,800 seconds
             if elapsed_seconds < cooldown_seconds:
@@ -662,3 +703,123 @@ async def change_password(
     }
 
 
+# ── POST /user/verify-initiate ────────────────────────────────────────────────
+@router.post(
+    "/verify-initiate",
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_auth_per_minute))],
+)
+async def verify_initiate(
+    body: VerifyInitiateRequest,
+    identity: Identity = Depends(get_user_identity),
+    repo: UserRepository = Depends(get_repo),
+):
+    """Initiate email verification by generating and dispatching a 6-digit OTP.
+
+    - Validates email syntax (RFC 5322 basic pattern).
+    - Enforces 60-second resend cooldown per user per type.
+    - Generates a secure 6-digit OTP, stores its salted SHA-256 hash in Redis (TTL 600s).
+    - Dispatches branded HTML + text email via Mailtrap SMTP.
+    - Always returns HTTP 200 to prevent email enumeration.
+    """
+    from src.Infrastructure.redis_service import (
+        generate_otp, store_otp, check_resend_cooldown, set_resend_cooldown
+    )
+    from src.Services.email_service import send_verification_email
+
+    logger.debug("Entering verify_initiate: user_id=%s, type=%s", identity.user_id, body.type)
+    if not identity.is_authenticated or not identity.user_id:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+
+    if body.type != "email":
+        raise HTTPException(status_code=400, detail="Only email verification is currently supported.")
+
+    identifier = body.identifier.strip().lower()
+
+    # Basic RFC 5322 email syntax validation
+    import re as _re
+    if not _re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", identifier):
+        raise HTTPException(status_code=422, detail="Invalid email address format.")
+
+    # Check 60-second resend cooldown
+    in_cooldown, seconds_remaining = check_resend_cooldown(identity.user_id, body.type)
+    if in_cooldown:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Please wait {seconds_remaining} second(s) before requesting a new code.",
+        )
+
+    # Fetch user for username (used in email template)
+    user = await repo.get_by_id(identity.user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User account not found.")
+
+    # Check uniqueness — if email differs from current, ensure it's not taken
+    current_email = user.get("email", "").strip().lower()
+    if identifier != current_email:
+        existing = await repo.get_by_email(identifier)
+        if existing and existing.get("id") != identity.user_id:
+            # Return generic success to prevent email enumeration
+            logger.info(
+                "verify_initiate: email %s already claimed by another user; returning generic 200",
+                identifier,
+            )
+            return {"success": True, "message": "Verification code dispatched.", "cooldown_seconds": 60}
+
+    # Generate OTP, store hash, set cooldown
+    otp = generate_otp()
+    store_otp(identity.user_id, body.type, identifier, otp)
+    set_resend_cooldown(identity.user_id, body.type)
+
+    # Dispatch email (non-blocking via asyncio.to_thread)
+    username = user.get("username", "User")
+    await send_verification_email(to_email=identifier, otp=otp, username=username)
+
+    logger.info("verify_initiate: OTP dispatched for user_id=%s to %s", identity.user_id, identifier)
+    return {"success": True, "message": "Verification code dispatched.", "cooldown_seconds": 60}
+
+
+# ── POST /user/verify-complete ────────────────────────────────────────────────
+@router.post(
+    "/verify-complete",
+    response_model=UserRecord,
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_auth_per_minute))],
+)
+async def verify_complete(
+    body: VerifyCompleteRequest,
+    identity: Identity = Depends(get_user_identity),
+    repo: UserRepository = Depends(get_repo),
+):
+    """Complete email verification by validating the submitted 6-digit OTP.
+
+    - Verifies OTP against Redis-stored salted SHA-256 hash.
+    - Enforces 5-attempt brute-force lockout per OTP issuance.
+    - On success: updates users.email and users.email_verified_at.
+    - Returns updated UserRecord DTO.
+    """
+    from src.Infrastructure.redis_service import verify_otp
+    from datetime import datetime, timezone
+
+    logger.debug("Entering verify_complete: user_id=%s, type=%s", identity.user_id, body.type)
+    if not identity.is_authenticated or not identity.user_id:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+
+    if body.type != "email":
+        raise HTTPException(status_code=400, detail="Only email verification is currently supported.")
+
+    identifier = body.identifier.strip().lower()
+
+    # Verify OTP
+    ok, error_msg = verify_otp(identity.user_id, body.type, identifier, body.otp)
+    if not ok:
+        logger.warning("verify_complete failed for user_id=%s: %s", identity.user_id, error_msg)
+        raise HTTPException(status_code=400, detail=error_msg)
+
+    # Mark email as verified (and update email if it changed)
+    verified_at = datetime.now(timezone.utc)
+    updated_user = await repo.set_email_verified(identity.user_id, identifier, verified_at)
+    if not updated_user:
+        logger.error("verify_complete: set_email_verified returned no data for user_id=%s", identity.user_id)
+        raise HTTPException(status_code=500, detail="Failed to update email verification status.")
+
+    logger.info("verify_complete: email verified for user_id=%s, email=%s", identity.user_id, identifier)
+    return updated_user

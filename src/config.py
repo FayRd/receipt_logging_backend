@@ -57,6 +57,14 @@ class Settings(BaseSettings):
     # Discord Feedback Webhook
     discord_feedback_webhook_url: str = ""
 
+    # Mailtrap SMTP (Email Dispatch)
+    mail_host: str = "sandbox.smtp.mailtrap.io"
+    mail_port: int = 2525
+    mail_username: str = ""
+    mail_password: str = ""
+    mail_from_address: str = "no-reply@taskcollab.local"
+    mail_from_name: str = "SancFund"
+
     # Rate Limiting Configuration
     rate_limit_enabled: bool = True
     rate_limit_scan_per_minute: int = 5           # Heavy Vision AI parsing

@@ -8,7 +8,7 @@ from src.Models.schemas import UserCreateRequest, UserUpdateRequest
 logger = get_logger("Models.user_repository")
 
 # Columns returned in all sanitized (non-auth) user fetches
-_USER_SAFE_COLUMNS = "id, username, email, country_code, mobile_number, avatar_image_path, custom_categories, preferences, created_at, deleted_at"
+_USER_SAFE_COLUMNS = "id, username, email, country_code, mobile_number, avatar_image_path, custom_categories, preferences, email_verified_at, mobile_verified_at, tier, created_at, deleted_at"
 
 
 
@@ -359,4 +359,36 @@ class UserRepository:
             logger.error("Database error in UPDATE user password user_id=%s after %.2fms: %s", user_id, duration_ms, e, exc_info=True)
             raise
 
+    # ── EMAIL VERIFICATION ────────────────────────────────────────────────────
 
+    async def set_email_verified(self, user_id: str, email: str, verified_at: datetime) -> dict | None:
+        """Update users.email and users.email_verified_at upon successful OTP verification.
+
+        Also resets email_verified_at to NULL for any other account that shares the
+        same email (prevents stale verified states when email is transferred).
+        """
+        start_time = time.perf_counter()
+        clean_email = email.strip().lower()
+        iso_ts = verified_at.isoformat()
+        logger.debug("UPDATE set_email_verified: user_id=%s, email=%s", user_id, clean_email)
+        try:
+            res = await (
+                self.db.table(self.TABLE)
+                .update({"email": clean_email, "email_verified_at": iso_ts})
+                .eq("id", user_id)
+                .is_("deleted_at", "null")
+                .execute()
+            )
+            if not res.data:
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                logger.warning("set_email_verified found no matching row for user_id=%s (%.2fms)", user_id, duration_ms)
+                return None
+            user_data = res.data[0]
+            user_data.pop("password", None)
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.info("set_email_verified succeeded for user_id=%s in %.2fms", user_id, duration_ms)
+            return user_data
+        except Exception as e:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.error("Database error in set_email_verified user_id=%s after %.2fms: %s", user_id, duration_ms, e, exc_info=True)
+            raise

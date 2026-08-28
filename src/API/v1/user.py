@@ -224,7 +224,10 @@ async def get_my_avatar(
     return Response(
         content=data,
         media_type="image/jpeg",
-        headers={"Cache-Control": "private, max-age=3600"},
+        headers={
+            "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+        },
     )
 
 

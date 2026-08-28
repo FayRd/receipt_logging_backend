@@ -516,3 +516,23 @@ class FeedbackSubmitResponse(BaseModel):
     success: bool
     message: str
 
+
+# ── TIER QUOTA SCHEMAS ───────────────────────────────────────────────────────
+
+class QuotaMetric(BaseModel):
+    used: int
+    limit: int  # -1 represents unlimited
+    remaining: int  # -1 represents unlimited
+    is_exhausted: bool
+
+
+class QuotaStatusResponse(BaseModel):
+    success: bool = True
+    tier: str
+    scan: QuotaMetric
+    chat: QuotaMetric
+    reset_at: str
+    seconds_to_reset: int
+    reset_countdown: str
+
+

@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from supabase import AsyncClient
 from src.Infrastructure.database import get_supabase_client
-from src.Auth.identity import Identity, get_user_identity
+from src.Auth.identity import Identity, get_user_identity, get_scoped_identity
 from src.Auth.rate_limiter import rate_limit
 from src.Infrastructure.logger import get_logger
 from src.Models.schemas import (
@@ -23,6 +23,7 @@ from src.Models.schemas import (
     TokenRefreshResponse,
     VerifyInitiateRequest,
     VerifyCompleteRequest,
+    QuotaStatusResponse,
 )
 from src.Models.Users.user_repository import UserRepository
 from src.Models.Users.password_reset_repository import PasswordResetRepository
@@ -823,3 +824,21 @@ async def verify_complete(
 
     logger.info("verify_complete: email verified for user_id=%s, email=%s", identity.user_id, identifier)
     return updated_user
+
+
+# ── GET /user/quota ──────────────────────────────────────────────────────────
+@router.get(
+    "/quota",
+    response_model=QuotaStatusResponse,
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_health_per_minute))],
+)
+async def get_user_quota(
+    identity: Identity = Depends(get_scoped_identity),
+    user_repo: UserRepository = Depends(get_repo),
+):
+    """Retrieve caller's current tier, scan quota, chat token quota, and reset countdown."""
+    from src.Services.quota_service import get_quota_service
+    quota_svc = get_quota_service()
+    status = await quota_svc.get_quota_status(identity, user_repo)
+    return status
+

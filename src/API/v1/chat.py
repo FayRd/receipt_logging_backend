@@ -177,6 +177,24 @@ async def send_chat_query(
         identity.user_id,
         identity.device_id,
     )
+    from src.Services.quota_service import get_quota_service
+    from src.Models.Users.user_repository import UserRepository
+    quota_svc = get_quota_service()
+    user_repo = UserRepository(repo.db) if identity.is_authenticated else None
+
+    allowed, q_status, err_msg = await quota_svc.check_chat_quota(identity, user_repo=user_repo)
+    if not allowed:
+        logger.warning(
+            "Chat quota exceeded for identity (%s): %s",
+            identity.user_id or identity.device_id,
+            err_msg,
+        )
+        raise HTTPException(
+            status_code=429,
+            detail=err_msg,
+            headers={"Retry-After": str(q_status["seconds_to_reset"])},
+        )
+
     # ── Cloud Store Mode (Authenticated User) ──────────────────────────────────
     if identity.is_authenticated:
         if body.conversation_id:
@@ -201,9 +219,15 @@ async def send_chat_query(
 
         # Generate Gemini response with identity-scoped receipt context FIRST
         try:
-            ai_response_text = await service.generate_response(
+            gen_res = await service.generate_response(
                 identity, body.message, history_messages
             )
+            if isinstance(gen_res, tuple):
+                ai_response_text, tokens_used = gen_res
+            else:
+                ai_response_text = str(gen_res)
+                tokens_used = max(1, (len(body.message) + len(ai_response_text)) // 4)
+            await quota_svc.consume_chat_quota(identity, tokens=tokens_used, user_repo=user_repo)
         except Exception as e:
             logger.error("Failed to generate AI response in cloud mode: %s", e, exc_info=True)
             raise HTTPException(
@@ -240,12 +264,18 @@ async def send_chat_query(
 
     # ── Local Store Mode (Guest) ────────────────────────────────────────────────
     try:
-        ai_response_text = await service.generate_response_local(
+        gen_res = await service.generate_response_local(
             identity=identity,
             user_message=body.message,
             conversation_history=body.conversation_history,
             recent_receipts=body.receipts,
         )
+        if isinstance(gen_res, tuple):
+            ai_response_text, tokens_used = gen_res
+        else:
+            ai_response_text = str(gen_res)
+            tokens_used = max(1, (len(body.message) + len(ai_response_text)) // 4)
+        await quota_svc.consume_chat_quota(identity, tokens=tokens_used, user_repo=user_repo)
     except Exception as e:
         logger.error("Failed to generate AI response in local mode: %s", e, exc_info=True)
         raise HTTPException(

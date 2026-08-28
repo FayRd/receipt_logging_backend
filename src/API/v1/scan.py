@@ -201,6 +201,17 @@ async def parse_receipt(
         identity.user_id,
         identity.device_id,
     )
+    from src.Services.quota_service import get_quota_service
+    quota_svc = get_quota_service()
+    allowed, q_status, err_msg = await quota_svc.check_scan_quota(identity, count=1)
+    if not allowed:
+        logger.warning("Scan quota exceeded for identity (%s): %s", identity.user_id or identity.device_id, err_msg)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=err_msg,
+            headers={"Retry-After": str(q_status["seconds_to_reset"])},
+        )
+
     settings = get_settings()
 
     try:
@@ -254,6 +265,7 @@ async def parse_receipt(
             receipt.total_amount,
             receipt.confidence_score,
         )
+        await quota_svc.consume_scan_quota(identity, count=1)
         return ScanResponse(success=True, data=receipt, error=None)
 
     except HTTPException as he:
@@ -335,6 +347,23 @@ async def parse_many_receipts(
             detail=f"Bulk receipt parsing requires between 1 and 10 image files. Received {len(files)} files.",
         )
 
+    # Enforce daily scan quota
+    from src.Services.quota_service import get_quota_service
+    quota_svc = get_quota_service()
+    allowed, q_status, err_msg = await quota_svc.check_scan_quota(identity, count=len(files))
+    if not allowed:
+        logger.warning(
+            "Bulk scan quota exceeded for identity (%s): requested=%d, error=%s",
+            identity.user_id or identity.device_id,
+            len(files),
+            err_msg,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=err_msg,
+            headers={"Retry-After": str(q_status["seconds_to_reset"])},
+        )
+
     # Enforce image size ceiling per file
     settings = get_settings()
     file_payloads: list[tuple[bytes, str]] = []
@@ -387,6 +416,7 @@ async def parse_many_receipts(
 
         # Schedule batch worker to process jobs sequentially and handle provider halts
         background_tasks.add_task(process_batch_worker, batch_id, job_items)
+        await quota_svc.consume_scan_quota(identity, count=len(files))
 
         await redis_client.expire(batch_key, settings.redis_job_ttl_seconds)
 

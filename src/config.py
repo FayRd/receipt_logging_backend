@@ -94,6 +94,14 @@ class Settings(BaseSettings):
     jwt_access_token_expire_minutes: int = 15
     jwt_refresh_token_expire_days: int = 30
 
+    # Tier Daily Quota Configuration
+    # Limits for /scan/* (scans/day) and /chat/query (tokens/day). -1 means unlimited.
+    tier_quotas: dict[str, dict[str, int]] = {
+        "free": {"max_scans_per_day": 10, "max_chat_tokens_per_day": 10_000},
+        "premium": {"max_scans_per_day": 50, "max_chat_tokens_per_day": 50_000},
+        "dev": {"max_scans_per_day": -1, "max_chat_tokens_per_day": -1},
+    }
+
     @property
     def effective_ai_provider(self) -> str:
         """Return the resolved AI provider ("gemini" or "openrouter").

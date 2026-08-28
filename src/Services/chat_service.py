@@ -75,8 +75,8 @@ class ChatService:
             return ""
         return text.replace("<", "&lt;").replace(">", "&gt;")
 
-    async def _call_gemini(self, formatted_contents: list) -> str:
-        """Send a content list to the configured Gemini chat model and return the response text.
+    async def _call_gemini(self, formatted_contents: list) -> tuple[str, int]:
+        """Send a content list to the configured Gemini chat model and return (response_text, tokens).
 
         Uses the Google GenAI async SDK with the session-scoped Gemini client.
         """
@@ -85,15 +85,24 @@ class ChatService:
             contents=formatted_contents,
         )
         usage = getattr(response, "usage_metadata", None)
+        text = (response.text or "").strip()
+        tokens = 0
+        if usage:
+            tokens = getattr(usage, "total_token_count", 0) or (
+                getattr(usage, "prompt_token_count", 0) + getattr(usage, "candidates_token_count", 0)
+            )
+        if tokens <= 0:
+            tokens = max(1, len(text) // 4)
         logger.info(
-            "Gemini chat response generated. Output len=%d, usage_metadata=%s",
-            len(response.text or ""),
+            "Gemini chat response generated. Output len=%d, total_tokens=%d, usage_metadata=%s",
+            len(text),
+            tokens,
             usage,
         )
-        return (response.text or "").strip()
+        return text, tokens
 
-    async def _call_openrouter(self, messages: list[dict]) -> str:
-        """Send a messages list to the configured OpenRouter chat model and return the response text.
+    async def _call_openrouter(self, messages: list[dict]) -> tuple[str, int]:
+        """Send a messages list to the configured OpenRouter chat model and return (response_text, tokens).
 
         Uses the OpenAI-compatible chat completions REST API via async httpx.
         The same receipt context, prompt-injection sanitization, and history windowing
@@ -106,13 +115,15 @@ class ChatService:
         resp = await self._http_client.post("/chat/completions", content=json.dumps(payload))
         resp.raise_for_status()
         result = resp.json()
-        text = result["choices"][0]["message"]["content"]
+        text = result["choices"][0]["message"]["content"].strip()
+        tokens = result.get("usage", {}).get("total_tokens", 0) or max(1, len(text) // 4)
         logger.info(
-            "OpenRouter chat response generated. Output len=%d, model=%s",
+            "OpenRouter chat response generated. Output len=%d, total_tokens=%d, model=%s",
             len(text),
+            tokens,
             self.settings.openrouter_chat_model,
         )
-        return text.strip()
+        return text, tokens
 
     def _build_receipt_context(self, receipts_data: list[dict]) -> str:
         """Format a Supabase receipt record list into a sanitized RAG context block."""
@@ -208,12 +219,10 @@ class ChatService:
         identity: Identity,
         user_message: str,
         history_messages: list[dict],
-    ) -> str:
+    ) -> tuple[str, int]:
         """Retrieve identity-scoped receipts for RAG context and call the configured AI provider.
 
-        Supports both Google GenAI (Gemini) and OpenRouter. The active provider is determined
-        by settings.effective_ai_provider. Receipt context is fetched from Supabase and injected
-        into the system prompt using the sanitized <receipt_context> block.
+        Returns (response_text, tokens_used).
         """
         provider = self.settings.effective_ai_provider
         model_name = (
@@ -292,12 +301,10 @@ class ChatService:
         user_message: str,
         conversation_history: list,
         recent_receipts: list,
-    ) -> str:
+    ) -> tuple[str, int]:
         """Generate an AI response for local/guest store mode using the configured AI provider.
 
-        Supports both Google GenAI (Gemini) and OpenRouter. The active provider is determined
-        by settings.effective_ai_provider. Receipt context is built from client-supplied local
-        receipts (Isar/offline mode), not Supabase.
+        Returns (response_text, tokens_used).
         """
         provider = self.settings.effective_ai_provider
         model_name = (

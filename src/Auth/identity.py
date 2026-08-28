@@ -369,23 +369,16 @@ async def get_scoped_identity(
             )
         logger.debug("Constant-time digest comparison PASS for guest device token (device_name='%s')", clean_device_name)
 
-        db_user_id = device.get("user_id")
-        db_username = None
-        if db_user_id:
-            user_repo = UserRepository(db)
-            user_row = await user_repo.get_by_id(db_user_id)
-            if user_row:
-                db_username = user_row.get("username")
         canonical_name = device.get("name", clean_device_name)
         identity = Identity(
-            user_id=db_user_id,
-            username=db_username,
+            user_id=None,
+            username=None,
             device_id=device["id"],
             device_name=canonical_name,
         )
         logger.info(
-            "Identity resolved (mode=guest): user_id=%s, username=%s, device_id=%s, device_name=%s",
-            db_user_id, db_username, device["id"], canonical_name
+            "Identity resolved (mode=guest): user_id=None, username=None, device_id=%s, device_name=%s",
+            device["id"], canonical_name
         )
         return identity
 
@@ -596,17 +589,15 @@ async def get_sse_identity(
             detail="Invalid device authentication token.",
         )
 
-    db_user_id = device.get("user_id")
     canonical_name = device.get("name", device_name)
     identity = Identity(
-        user_id=db_user_id,
-        username=username if username else None,
+        user_id=None,
+        username=None,
         device_id=device["id"],
         device_name=canonical_name,
     )
-    resolution_mode = "user" if identity.is_authenticated else "device"
     logger.info(
-        "Identity resolved (mode=%s/sse): user_id=%s, username=%s, device_id=%s, device_name=%s",
-        resolution_mode, db_user_id, username, device["id"], canonical_name
+        "Identity resolved (mode=device/sse): user_id=None, username=None, device_id=%s, device_name=%s",
+        device["id"], canonical_name
     )
     return identity

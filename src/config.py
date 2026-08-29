@@ -1,4 +1,5 @@
 from functools import lru_cache
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -8,7 +9,15 @@ class Settings(BaseSettings):
     # Infrastructure Credentials & Services
     supabase_url: str
     supabase_key: str  
-    redis_connection_string: str = "redis://localhost:6379"
+    redis_connection_string: str = Field(
+        default="redis://localhost:6379",
+        validation_alias=AliasChoices(
+            "redis_connection_string",
+            "redis_url",
+            "REDIS_CONNECTION_STRING",
+            "REDIS_URL",
+        ),
+    )
     gemini_api_key: str = ""
     openai_api_key: str = ""
     logfire_token: str = ""

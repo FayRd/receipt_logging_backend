@@ -67,9 +67,8 @@ def _get_redis():
     try:
         import redis as redis_lib  # type: ignore
         settings = get_settings()
-        client = redis_lib.Redis(
-            host=getattr(settings, "redis_host", "localhost"),
-            port=getattr(settings, "redis_port", 6379),
+        client = redis_lib.from_url(
+            settings.redis_connection_string,
             db=0,
             decode_responses=True,
             socket_connect_timeout=2,

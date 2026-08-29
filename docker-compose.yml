@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: receipt_logging_backend
+    container_name: sancfund-backend
     restart: unless-stopped
     ports:
       - "8085:8085"

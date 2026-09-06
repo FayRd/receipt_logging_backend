@@ -2,6 +2,7 @@ import asyncio
 import base64
 import json
 import random
+import re
 import httpx
 from google import genai
 from google.genai import types
@@ -72,7 +73,7 @@ Document Validation & Confidence Scoring Rules:
 6. category: Infer from context. Must be one of: Dining, Groceries, Transport, Utilities, Shopping, Entertainment, Health, Supplies, Other.
 7. currency: ISO 4217 code (e.g. USD, SGD, MYR, EUR, GBP). Default to USD if unclear.
 8. line_items: Extract all purchased products, items, and services. Also extract:
-   - Surcharges (e.g. Service Charge, GST/VAT/Tax, Delivery Fee, Tips, Surcharge) as separate line items with positive unit_price and total_price values.
+   - Surcharges (e.g. Service Charge, non-inclusive GST/VAT/Tax, Delivery Fee, Tips, Surcharge) as separate line items with positive unit_price and total_price values.
    - Discounts (e.g. Vouchers, Coupons, Member Discounts, Promo Codes, Special Reductions, Trade-ins, Deductions) as separate line items with NEGATIVE unit_price and total_price values (e.g. -2.50).
 9. Set missing optional fields (subtotal, tax_amount, notes, line_items, category) to null.
 10. Output ONLY valid JSON matching the schema. No prose, no markdown wrappers.
@@ -96,6 +97,41 @@ Output JSON must match this exact schema (all field names are snake_case):
   "notes": string|null
 }
 """
+
+_VALID_JSON_ESCAPE_PATTERN = re.compile(r"\\(?:[\\\"/bfnrt]|u[0-9a-fA-F]{4})")
+
+
+def _sanitize_json_escapes(text: str) -> str:
+    """Remove invalid JSON escape sequences from an LLM-generated JSON string.
+
+    The JSON specification (RFC 8259) only permits the escape sequences:
+    \\", \\\\, \\/, \\b, \\f, \\n, \\r, \\t, and \\uXXXX (where XXXX is 4 hex digits).
+    LLMs (particularly when generating receipt transcripts with discounts, percentages,
+    footnotes, or LaTeX/markdown markup) frequently emit invalid escapes like \\%, \\*,
+    \\(, \\), \\-, \\$, or \\unit.
+
+    This function preserves all valid JSON escape sequences (\\", \\\\, \\n, \\uXXXX, etc.)
+    while stripping stray backslashes from invalid escapes, preventing Pydantic / JSON
+    parser ValidationError failures.
+    """
+    parts: list[str] = []
+    idx = 0
+    length = len(text)
+    while idx < length:
+        bs_idx = text.find("\\", idx)
+        if bs_idx == -1:
+            parts.append(text[idx:])
+            break
+        parts.append(text[idx:bs_idx])
+        m = _VALID_JSON_ESCAPE_PATTERN.match(text, bs_idx)
+        if m:
+            parts.append(m.group(0))
+            idx = m.end()
+        else:
+            # Skip the backslash (strip it from the invalid escape sequence)
+            idx = bs_idx + 1
+
+    return "".join(parts)
 
 
 class ExtractionService:
@@ -268,15 +304,35 @@ class ExtractionService:
                     text = await self._extract_openrouter(context)
 
                 # Clean markdown wrappers that some models may emit despite prompt instructions
-                if text.startswith("```json"):
-                    text = text[7:]
-                if text.startswith("```"):
-                    text = text[3:]
-                if text.endswith("```"):
-                    text = text[:-3]
                 text = text.strip()
+                if text.startswith("```"):
+                    lines = text.splitlines()
+                    if lines and lines[0].startswith("```"):
+                        lines = lines[1:]
+                    if lines and lines[-1].strip() == "```":
+                        lines = lines[:-1]
+                    text = "\n".join(lines).strip()
 
-                receipt = Receipt.model_validate_json(text)
+                # Extract JSON object substring if model wrapped it in prose
+                first_brace = text.find("{")
+                last_brace = text.rfind("}")
+                if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+                    text = text[first_brace : last_brace + 1]
+
+                # Sanitize invalid escape sequences (common in OpenRouter LLM outputs)
+                text = _sanitize_json_escapes(text)
+
+                try:
+                    receipt = Receipt.model_validate_json(text)
+                except Exception as json_err:
+                    logger.warning(
+                        "model_validate_json failed on %s response (%s). Attempting fallback via json.loads...",
+                        provider,
+                        json_err,
+                    )
+                    data = json.loads(text, strict=False)
+                    receipt = Receipt.model_validate(data)
+
                 logger.info(
                     "Successfully extracted receipt via %s: merchant='%s', total=%.2f, confidence=%.2f, items_count=%d",
                     provider,

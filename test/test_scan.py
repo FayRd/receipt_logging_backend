@@ -722,7 +722,86 @@ async def test_batch_worker_low_confidence_marks_job_failed_with_notes():
         scan_module.redis_client = original_redis
 
 
+def test_sanitize_json_escapes_unit():
+    from src.Services.extraction_service import _sanitize_json_escapes
+
+    # Test cases: invalid escapes stripped, valid escapes preserved
+    cases = [
+        (r"5\% discount", "5% discount"),
+        (r"\\", r"\\"),
+        (r"\\%", r"\\%"),
+        (r"\\\%", r"\\%"),
+        (r'\"quoted\"', r'\"quoted\"'),
+        (r"\n", r"\n"),
+        (r"\t", r"\t"),
+        (r"\unit", "unit"),
+        (r"\u0020", r"\u0020"),
+        (r"\(inclusive\)", "(inclusive)"),
+        (r"\* not subject to GST", "* not subject to GST"),
+        (r"\ ", " "),
+        (r"\S", "S"),
+        (r"\$10.50", "$10.50"),
+        (r"Total \- 50", "Total - 50"),
+    ]
+
+    for raw, expected in cases:
+        assert _sanitize_json_escapes(raw) == expected
+
+
+@pytest.mark.anyio
+async def test_extraction_service_openrouter_recovers_from_invalid_escapes():
+    """Verify that OpenRouter output with invalid escapes (like \\% and \\* not subject to GST) parses cleanly."""
+    from src.Services.extraction_service import ExtractionService
+
+    bad_json_response = """```json
+    {
+      "merchant_name": "Store \\(M\\) Sdn Bhd",
+      "total_amount": 149.90,
+      "currency": "MYR",
+      "category": "Groceries",
+      "date": "2026-09-06T20:00:00Z",
+      "raw_text": "STORE SDN BHD\\n\\* NOT SUBJECT TO GST\\nDisc: 5\\%\\nTax: 0\\% [\\unit #1]",
+      "confidence_score": 0.95,
+      "line_items": [
+        {"description": "Milk 1L \\(Promo\\)", "quantity": 1, "unit_price": 7.50, "total_price": 7.50}
+      ]
+    }
+    ```"""
+
+    service = ExtractionService()
+    mock_resp = AsyncMock()
+    mock_resp.raise_for_status = lambda: None
+    mock_resp.json = lambda: {
+        "choices": [{"message": {"content": bad_json_response}}]
+    }
+
+    with patch.object(service, "settings") as mock_settings:
+        mock_settings.effective_ai_provider = "openrouter"
+        mock_settings.openrouter_vision_model = "google/gemini-2.5-flash-lite"
+        mock_settings.confidence_threshold = 0.8
+        service._http_client = AsyncMock()
+        service._http_client.post = AsyncMock(return_value=mock_resp)
+
+        context = ScanContext(
+            image_bytes=b"fake_image_bytes",
+            content_type="image/jpeg",
+            user_id=None,
+            device_id="dev-test",
+        )
+
+        receipt = await service.extract_from_image(context)
+
+        assert receipt.merchant_name == "Store (M) Sdn Bhd"
+        assert receipt.total_amount == 149.90
+        assert receipt.currency == "MYR"
+        assert "5%" in receipt.raw_text
+        assert "* NOT SUBJECT TO GST" in receipt.raw_text
+        assert len(receipt.line_items) == 1
+        assert receipt.line_items[0].description == "Milk 1L (Promo)"
+
+
 if __name__ == "__main__":
     import pytest
     import sys
     sys.exit(pytest.main([__file__]))
+

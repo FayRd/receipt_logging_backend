@@ -92,7 +92,8 @@ class ScanContext:
     image_bytes: bytes
     content_type: str
     user_id: str | None
-    device_id: str
+    device_id: str | None
+    tier: str = "free"
 
 
 class ScanResponse(BaseModel):
@@ -534,5 +535,49 @@ class QuotaStatusResponse(BaseModel):
     reset_at: str
     seconds_to_reset: int
     reset_countdown: str
+
+
+# ── ECONOMIC MODEL & SUBSCRIPTION SCHEMAS ───────────────────────────────────
+
+class UserStatsResponse(BaseModel):
+    success: bool = True
+    total_receipts: int
+    time_saved_seconds: float
+    time_saved_minutes: float
+    trial_start_at: str | None = None
+    discount_offer_shown_at: str | None = None
+    tier: str
+    is_in_trial: bool
+    ad_scans_today: int
+    ad_scans_remaining: int
+
+
+class AdScanGrantResponse(BaseModel):
+    success: bool
+    ad_scans_today: int
+    ad_scans_remaining: int
+    message: str
+
+
+class SubscriptionStatusResponse(BaseModel):
+    success: bool = True
+    tier: str
+    is_in_trial: bool
+    trial_start_at: str | None = None
+    trial_days_remaining: int | None = None
+    is_trial_expired: bool = False
+    discount_offer_shown_at: str | None = None
+    discount_days_remaining: int | None = None
+    is_discount_active: bool = False
+    ad_scans_today: int = 0
+    ad_scans_remaining: int = 5
+
+
+class SubscriptionSyncRequest(BaseModel):
+    is_premium: bool
+    product_identifier: str | None = None
+    original_purchase_date: str | None = None
+    expiration_date: str | None = None
+    entitlement_id: str = "premium"
 
 

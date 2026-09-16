@@ -24,6 +24,8 @@ from src.Models.schemas import (
     VerifyInitiateRequest,
     VerifyCompleteRequest,
     QuotaStatusResponse,
+    UserStatsResponse,
+    AdScanGrantResponse,
 )
 from src.Models.Users.user_repository import UserRepository
 from src.Models.Users.password_reset_repository import PasswordResetRepository
@@ -200,6 +202,62 @@ async def get_my_profile(
         raise HTTPException(status_code=404, detail="User not found.")
     logger.info("Retrieved profile for user_id=%s, username=%s", identity.user_id, user.get("username"))
     return user
+
+
+# ── GET /user/me/stats ────────────────────────────────────────────────────────
+@router.get(
+    "/me/stats",
+    response_model=UserStatsResponse,
+    summary="Get user receipt count, time saved, trial and downgrade discount status",
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_crud_per_minute))],
+)
+async def get_user_stats(
+    identity: Identity = Depends(get_user_identity),
+    repo: UserRepository = Depends(get_repo),
+):
+    """Retrieve statistical aggregates for the current user:
+    - Total receipts scanned and saved
+    - Estimated time saved by scanning using the fast AI vision model (16.5s per scan avg)
+    - 14-day trial status and downgrade discount offer expiry window
+    """
+    logger.debug("Entering get_user_stats: user_id=%s", identity.user_id)
+    stats = await repo.get_user_stats(identity.user_id)
+    return UserStatsResponse(
+        success=True,
+        total_receipts=stats["total_receipts"],
+        time_saved_seconds=stats["time_saved_seconds"],
+        time_saved_minutes=stats["time_saved_minutes"],
+        trial_start_at=stats.get("trial_start_at"),
+        discount_offer_shown_at=stats.get("discount_offer_shown_at"),
+        tier=stats.get("tier", "free"),
+        is_in_trial=stats.get("is_in_trial", False),
+        ad_scans_today=stats.get("ad_scans_today", 0),
+        ad_scans_remaining=stats.get("ad_scans_remaining", 5),
+    )
+
+
+# ── POST /user/me/ad-scan-grant ───────────────────────────────────────────────
+@router.post(
+    "/me/ad-scan-grant",
+    response_model=AdScanGrantResponse,
+    summary="Claim +1 scan bonus after watching a rewarded video ad (max 5/day)",
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_crud_per_minute))],
+)
+async def grant_ad_scan(
+    identity: Identity = Depends(get_user_identity),
+    repo: UserRepository = Depends(get_repo),
+):
+    """Grant 1 additional scan after completing a rewarded ad (max 5 ad scans per day)."""
+    logger.debug("Entering grant_ad_scan: user_id=%s", identity.user_id)
+    granted, count, msg = await repo.grant_ad_scan(identity.user_id)
+    if not granted:
+        raise HTTPException(status_code=400, detail=msg)
+    return AdScanGrantResponse(
+        success=True,
+        ad_scans_today=count,
+        ad_scans_remaining=max(0, 5 - count),
+        message=f"Ad scan reward granted. You now have {max(0, 5 - count)} ad scans remaining today.",
+    )
 
 
 # ── GET /user/me/avatar ───────────────────────────────────────────────────────
@@ -512,7 +570,7 @@ async def initiate_password_reset(
                     remaining_hours = (remaining_seconds % 86400) // 3600
                     day_word = "day" if remaining_days == 1 else "days"
                     hour_word = "hour" if remaining_hours == 1 else "hours"
-                    countdown_str = f"{remaining_days} {day_word} & {remaining_hours} {hour_word}"
+                    countdown_str = f"{remaining_days} {day_word} and {remaining_hours} {hour_word}"
             except (ValueError, TypeError):
                 pass
 

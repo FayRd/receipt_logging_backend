@@ -1,6 +1,6 @@
 import hashlib
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from supabase import AsyncClient
 from src.Infrastructure.logger import get_logger
 from src.Models.schemas import UserCreateRequest, UserUpdateRequest
@@ -178,12 +178,33 @@ class UserRepository:
     # ── WRITES ────────────────────────────────────────────────────────────────
 
     async def create(self, req: UserCreateRequest) -> dict:
-        """Hash password and insert a new user row. Returns sanitized record."""
+        """Hash password and insert a new user row with automatic 14-day Premium reverse trial. Returns sanitized record."""
         start_time = time.perf_counter()
         logger.debug("INSERT user create: username='%s', email='%s'", req.username, req.email)
         try:
             hashed_pwd = self.hash_password(req.password)
             cats = [c.model_dump(by_alias=True) if hasattr(c, "model_dump") else c for c in req.custom_categories] if req.custom_categories else []
+            prefs = dict(req.preferences) if req.preferences is not None else {}
+
+            device_id = prefs.get("trial_device_id")
+            is_device_reused = False
+            if device_id:
+                is_device_reused = await self.check_device_trial_used(device_id)
+
+            now = datetime.now(timezone.utc)
+            if is_device_reused:
+                # Device already consumed a trial
+                tier = "free"
+                prefs["is_in_trial"] = False
+                prefs["trial_ineligible"] = True
+                logger.info("Device %s already consumed trial. Account '%s' created on Free tier.", device_id, req.username)
+            else:
+                # Automatic 14-day Premium reverse trial
+                tier = "premium"
+                prefs["trial_start_at"] = now.isoformat()
+                prefs["is_in_trial"] = True
+                logger.info("Granting 14-day reverse Premium trial to new user '%s'", req.username)
+
             row = {
                 "username": req.username.strip(),
                 "email": req.email.strip().lower(),
@@ -192,13 +213,14 @@ class UserRepository:
                 "mobile_number": req.mobile_number,
                 "avatar_image_path": req.avatar_image_path,
                 "custom_categories": cats,
-                "preferences": req.preferences if req.preferences is not None else {},
+                "preferences": prefs,
+                "tier": tier,
             }
             res = await self.db.table(self.TABLE).insert(row).execute()
             user_data = res.data[0]
             user_data.pop("password", None)  # Never expose the hash
             duration_ms = (time.perf_counter() - start_time) * 1000
-            logger.info("INSERT user create succeeded: id=%s in %.2fms", user_data.get("id"), duration_ms)
+            logger.info("INSERT user create succeeded: id=%s, tier=%s in %.2fms", user_data.get("id"), user_data.get("tier"), duration_ms)
             return user_data
         except Exception as e:
             duration_ms = (time.perf_counter() - start_time) * 1000
@@ -392,3 +414,259 @@ class UserRepository:
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.error("Database error in set_email_verified user_id=%s after %.2fms: %s", user_id, duration_ms, e, exc_info=True)
             raise
+
+    # ── ECONOMIC MODEL: TRIALS, SUBSCRIPTIONS & AD SCANS ──────────────────────
+
+    async def check_device_trial_used(self, device_id: str | None) -> bool:
+        """Check whether a client device has already consumed a reverse trial."""
+        if not device_id or not device_id.strip():
+            return False
+        clean_device = device_id.strip()
+        try:
+            res = await (
+                self.db.table(self.TABLE)
+                .select("id")
+                .contains("preferences", {"trial_device_id": clean_device})
+                .is_("deleted_at", "null")
+                .limit(1)
+                .execute()
+            )
+            return bool(res.data)
+        except Exception as e:
+            logger.warning("Error checking device trial consumption for device=%s: %s", clean_device, e)
+            return False
+
+    async def set_trial_start(self, user_id: str, device_id: str | None = None) -> dict | None:
+        """Grant 14-day free reverse trial to user and record trial timestamp in preferences."""
+        start_time = time.perf_counter()
+        now = datetime.now(timezone.utc)
+        iso_ts = now.isoformat()
+        try:
+            user = await self.get_by_id(user_id)
+            if not user:
+                return None
+
+            prefs = user.get("preferences") or {}
+            prefs["trial_start_at"] = iso_ts
+            prefs["is_in_trial"] = True
+            if device_id:
+                prefs["trial_device_id"] = device_id.strip()
+
+            res = await (
+                self.db.table(self.TABLE)
+                .update({
+                    "tier": "premium",
+                    "preferences": prefs,
+                    "updated_at": iso_ts,
+                })
+                .eq("id", user_id)
+                .is_("deleted_at", "null")
+                .execute()
+            )
+            if not res.data:
+                return None
+            user_data = res.data[0]
+            user_data.pop("password", None)
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.info("Reverse trial granted (14 days) for user_id=%s in %.2fms", user_id, duration_ms)
+            return user_data
+        except Exception as e:
+            logger.error("Failed to set trial start for user_id=%s: %s", user_id, e, exc_info=True)
+            raise
+
+    async def set_tier(self, user_id: str, tier: str) -> dict | None:
+        """Update the user's subscription tier ('free', 'premium', 'dev')."""
+        start_time = time.perf_counter()
+        clean_tier = tier.strip().lower()
+        now = datetime.now(timezone.utc).isoformat()
+        try:
+            user = await self.get_by_id(user_id)
+            if not user:
+                return None
+
+            prefs = user.get("preferences") or {}
+            if clean_tier != "premium":
+                prefs["is_in_trial"] = False
+
+            res = await (
+                self.db.table(self.TABLE)
+                .update({
+                    "tier": clean_tier,
+                    "preferences": prefs,
+                    "updated_at": now,
+                })
+                .eq("id", user_id)
+                .is_("deleted_at", "null")
+                .execute()
+            )
+            if not res.data:
+                return None
+            user_data = res.data[0]
+            user_data.pop("password", None)
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.info("Updated tier to '%s' for user_id=%s in %.2fms", clean_tier, user_id, duration_ms)
+            return user_data
+        except Exception as e:
+            logger.error("Failed to set tier for user_id=%s: %s", user_id, e, exc_info=True)
+            raise
+
+    async def set_discount_offer_shown(self, user_id: str) -> dict | None:
+        """Record timestamp when the 7-day downgrade discount offer was first triggered."""
+        now = datetime.now(timezone.utc)
+        try:
+            user = await self.get_by_id(user_id)
+            if not user:
+                return None
+
+            prefs = user.get("preferences") or {}
+            if not prefs.get("discount_offer_shown_at"):
+                prefs["discount_offer_shown_at"] = now.isoformat()
+                res = await (
+                    self.db.table(self.TABLE)
+                    .update({"preferences": prefs, "updated_at": now.isoformat()})
+                    .eq("id", user_id)
+                    .is_("deleted_at", "null")
+                    .execute()
+                )
+                if res.data:
+                    user_data = res.data[0]
+                    user_data.pop("password", None)
+                    return user_data
+            return user
+        except Exception as e:
+            logger.warning("Failed to record discount_offer_shown_at for user_id=%s: %s", user_id, e)
+            return None
+
+    async def grant_ad_scan(self, user_id: str) -> tuple[bool, int, str]:
+        """Grant 1 additional scan after user watches a rewarded ad (max 5/day)."""
+        now = datetime.now(timezone.utc)
+        today_str = now.strftime("%Y-%m-%d")
+        try:
+            user = await self.get_by_id(user_id)
+            if not user:
+                return False, 0, "User not found"
+
+            prefs = user.get("preferences") or {}
+            saved_date = prefs.get("ad_scans_date")
+            ad_scans_today = prefs.get("ad_scans_today", 0)
+
+            if saved_date != today_str:
+                ad_scans_today = 0
+
+            if ad_scans_today >= 5:
+                return False, ad_scans_today, "Daily ad scan limit reached (5/5). Resets at 00:00 UTC."
+
+            ad_scans_today += 1
+            prefs["ad_scans_today"] = ad_scans_today
+            prefs["ad_scans_date"] = today_str
+
+            await (
+                self.db.table(self.TABLE)
+                .update({"preferences": prefs, "updated_at": now.isoformat()})
+                .eq("id", user_id)
+                .is_("deleted_at", "null")
+                .execute()
+            )
+            logger.info("Ad scan granted for user_id=%s (now %d/5)", user_id, ad_scans_today)
+            return True, ad_scans_today, ""
+        except Exception as e:
+            logger.error("Failed to grant ad scan for user_id=%s: %s", user_id, e, exc_info=True)
+            return False, 0, "Internal error granting ad scan"
+
+    async def get_user_stats(self, user_id: str) -> dict:
+        """Fetch receipt count, estimated time saved (16.5s/scan), trial and offer status."""
+        user = await self.get_by_id(user_id)
+        if not user:
+            return {
+                "total_receipts": 0,
+                "time_saved_seconds": 0.0,
+                "time_saved_minutes": 0.0,
+                "trial_start_at": None,
+                "discount_offer_shown_at": None,
+                "tier": "free",
+                "is_in_trial": False,
+                "ad_scans_today": 0,
+                "ad_scans_remaining": 5,
+            }
+
+        # Auto-expire trial if past 14 days
+        user = await self.check_and_apply_trial_expiration(user)
+
+        prefs = user.get("preferences") or {}
+        now = datetime.now(timezone.utc)
+        today_str = now.strftime("%Y-%m-%d")
+
+        # Query total active receipts
+        total_receipts = 0
+        try:
+            res = await (
+                self.db.table("receipts")
+                .select("id", count="exact")
+                .eq("user_id", user_id)
+                .is_("deleted_at", "null")
+                .execute()
+            )
+            total_receipts = res.count if res.count is not None else len(res.data or [])
+        except Exception as e:
+            logger.warning("Error fetching receipts count for stats user_id=%s: %s", user_id, e)
+
+        # Average time saved: 16.5 seconds per receipt (25s free vs 8.5s premium)
+        time_saved_seconds = round(total_receipts * 16.5, 1)
+        time_saved_minutes = round(time_saved_seconds / 60, 1)
+
+        ad_scans_today = prefs.get("ad_scans_today", 0) if prefs.get("ad_scans_date") == today_str else 0
+        ad_scans_remaining = max(0, 5 - ad_scans_today)
+
+        return {
+            "total_receipts": total_receipts,
+            "time_saved_seconds": time_saved_seconds,
+            "time_saved_minutes": time_saved_minutes,
+            "trial_start_at": prefs.get("trial_start_at"),
+            "discount_offer_shown_at": prefs.get("discount_offer_shown_at"),
+            "tier": user.get("tier", "free"),
+            "is_in_trial": prefs.get("is_in_trial", False),
+            "ad_scans_today": ad_scans_today,
+            "ad_scans_remaining": ad_scans_remaining,
+        }
+
+    async def check_and_apply_trial_expiration(self, user: dict) -> dict:
+        """Evaluate whether a user's 14-day reverse trial has expired, and downgrade if so."""
+        tier = (user.get("tier") or "free").lower()
+        prefs = user.get("preferences") or {}
+        if tier != "premium" or not prefs.get("is_in_trial"):
+            return user
+
+        trial_start_str = prefs.get("trial_start_at")
+        if not trial_start_str:
+            return user
+
+        try:
+            trial_start = datetime.fromisoformat(trial_start_str.replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+            if now - trial_start > timedelta(days=14):
+                # 14-day trial expired! Downgrade to free tier
+                logger.info("Trial expired for user_id=%s (started %s). Downgrading to Free.", user["id"], trial_start_str)
+                prefs["is_in_trial"] = False
+                prefs["trial_expired_at"] = now.isoformat()
+                if not prefs.get("discount_offer_shown_at"):
+                    prefs["discount_offer_shown_at"] = now.isoformat()
+
+                res = await (
+                    self.db.table(self.TABLE)
+                    .update({
+                        "tier": "free",
+                        "preferences": prefs,
+                        "updated_at": now.isoformat(),
+                    })
+                    .eq("id", user["id"])
+                    .is_("deleted_at", "null")
+                    .execute()
+                )
+                if res.data:
+                    updated = res.data[0]
+                    updated.pop("password", None)
+                    return updated
+        except Exception as e:
+            logger.warning("Failed evaluating trial expiration for user_id=%s: %s", user.get("id"), e)
+
+        return user

@@ -2,7 +2,7 @@
 Quota Service: Tier-Based Daily Usage Tracking & Enforcement
 
 Tracks daily usage for /scan/* (scans/day) and /chat/query (tokens/day) based on user tiers.
-- Free Tier (and Guests): 10 scans/day, 10k tokens/day
+- Free Tier (and Guests): 5 scans/day (+ up to 5 ad scans/day), 5k tokens/day
 - Premium Tier: 50 scans/day, 50k tokens/day
 - Dev Tier: Unlimited (-1)
 - Resets daily at 00:00 UTC
@@ -104,8 +104,11 @@ class QuotaService:
         if user_repo:
             try:
                 user = await user_repo.get_by_id(identity.user_id)
-                if user and user.get("tier"):
-                    return str(user["tier"]).strip().lower()
+                if user:
+                    # Check and auto-downgrade expired 14-day trials
+                    user = await user_repo.check_and_apply_trial_expiration(user)
+                    if user and user.get("tier"):
+                        return str(user["tier"]).strip().lower()
             except Exception as e:
                 logger.warning("Failed to fetch user tier for user_id=%s: %s", identity.user_id, e)
 
@@ -130,9 +133,9 @@ class QuotaService:
         """Return (max_scans_per_day, max_chat_tokens_per_day) for the given tier."""
         tier_cfg = self.settings.tier_quotas.get(tier.lower())
         if not tier_cfg:
-            tier_cfg = self.settings.tier_quotas.get("free", {"max_scans_per_day": 10, "max_chat_tokens_per_day": 10_000})
-        max_scans = tier_cfg.get("max_scans_per_day", 10)
-        max_chat_tokens = tier_cfg.get("max_chat_tokens_per_day", 10_000)
+            tier_cfg = self.settings.tier_quotas.get("free", {"max_scans_per_day": 5, "max_chat_tokens_per_day": 5_000})
+        max_scans = tier_cfg.get("max_scans_per_day", 5)
+        max_chat_tokens = tier_cfg.get("max_chat_tokens_per_day", 5_000)
         return max_scans, max_chat_tokens
 
     async def _get_used_count(self, key: str) -> int:
@@ -161,7 +164,7 @@ class QuotaService:
     async def get_quota_status(self, identity: Identity, user_repo=None) -> dict:
         """Fetch real-time scan and chat quota metrics for caller."""
         tier = await self.get_identity_tier(identity, user_repo)
-        max_scans, max_chat_tokens = self._get_tier_limits(tier)
+        base_max_scans, max_chat_tokens = self._get_tier_limits(tier)
         seconds_to_reset, reset_at_iso, date_str = self._get_utc_reset_window()
         countdown_str = self.format_countdown(seconds_to_reset)
 
@@ -171,6 +174,20 @@ class QuotaService:
 
         used_scans = await self._get_used_count(scan_redis_key)
         used_chat_tokens = await self._get_used_count(chat_redis_key)
+
+        # Apply daily ad scan bonuses for free tier users
+        ad_scans_today = 0
+        if tier == "free" and user_repo and identity.is_authenticated and identity.user_id:
+            try:
+                user = await user_repo.get_by_id(identity.user_id)
+                if user:
+                    prefs = user.get("preferences") or {}
+                    if prefs.get("ad_scans_date") == date_str:
+                        ad_scans_today = min(5, prefs.get("ad_scans_today", 0))
+            except Exception:
+                pass
+
+        max_scans = base_max_scans if base_max_scans == -1 else (base_max_scans + ad_scans_today)
 
         # Calculate scan metrics
         if max_scans == -1:
@@ -193,8 +210,11 @@ class QuotaService:
             "scan": {
                 "used": used_scans,
                 "limit": max_scans,
+                "base_limit": base_max_scans,
                 "remaining": remaining_scans,
                 "is_exhausted": is_scan_exhausted,
+                "ad_scans_today": ad_scans_today,
+                "ad_scans_remaining": max(0, 5 - ad_scans_today),
             },
             "chat": {
                 "used": used_chat_tokens,

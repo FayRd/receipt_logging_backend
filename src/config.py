@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     logfire_token: str = ""
     environment: str = "development"
 
+    # RevenueCat Subscriptions & Entitlements
+    revenuecat_webhook_auth_header: str = ""
+
     # CORS Configuration
     allowed_origins: list[str] = [
         "http://localhost",
@@ -27,10 +30,12 @@ class Settings(BaseSettings):
     # Scanning & AI Vision Extraction
     max_image_size_bytes: int = 10 * 1024 * 1024  # 10 MB file ceiling
     confidence_threshold: float = 0.8             # Validation confidence threshold
-    gemini_vision_model: str = "gemini-3.6-flash" # Gemini vision model name
+    gemini_vision_model: str = "gemini-3.6-flash" # Gemini vision model for Premium & Dev tiers
+    gemini_vision_model_free: str = "gemini-2.5-flash-lite" # Slower, cheaper model for Free tier
 
     # AI Chat Assistant & RAG
-    gemini_chat_model: str = "gemini-3.6-flash"    # Gemini chat model name
+    gemini_chat_model: str = "gemini-3.6-flash"    # Gemini chat model for Premium & Dev tiers
+    gemini_chat_model_free: str = "gemini-2.5-flash-lite" # Cheaper chat model for Free tier
     rag_recent_receipts_limit: int = 100          # Receipts context window (matches guest limit)
     rag_history_messages_limit: int = 50          # Message turns context window (matches guest limit)
     max_conversations_per_identity: int = 10      # Active conversation hard cap
@@ -98,7 +103,7 @@ class Settings(BaseSettings):
     # Tier Daily Quota Configuration
     # Limits for /scan/* (scans/day) and /chat/query (tokens/day). -1 means unlimited.
     tier_quotas: dict[str, dict[str, int]] = {
-        "free": {"max_scans_per_day": 10, "max_chat_tokens_per_day": 10_000},
+        "free": {"max_scans_per_day": 5, "max_chat_tokens_per_day": 5_000},
         "premium": {"max_scans_per_day": 50, "max_chat_tokens_per_day": 50_000},
         "dev": {"max_scans_per_day": -1, "max_chat_tokens_per_day": -1},
     }

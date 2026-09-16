@@ -11,7 +11,7 @@ from google import genai
 from src.config import get_settings
 from src.Infrastructure.logger import setup_logging, get_logger, set_request_id
 from src.Infrastructure.database import get_supabase_client, close_supabase_client
-from src.API.v1 import health, scan, receipts, user, devices, chat, help
+from src.API.v1 import health, scan, receipts, user, devices, chat, help, subscriptions
 
 # Initialize centralized logging
 setup_logging()
@@ -172,6 +172,7 @@ app.include_router(user.router, prefix="/api/v1")
 app.include_router(devices.router, prefix="/api/v1")
 app.include_router(chat.router, prefix="/api/v1")
 app.include_router(help.router, prefix="/api/v1")
+app.include_router(subscriptions.router, prefix="/api/v1")
 
 
 @app.get("/")

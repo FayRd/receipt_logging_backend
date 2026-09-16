@@ -259,11 +259,12 @@ def test_verify_complete_success_updates_email(client, monkeypatch):
 
 
 def test_verify_initiate_default_tier(client):
-    """Newly created users have tier == 'free'."""
+    """Newly created users receive a 14-day reverse trial with tier == 'premium'."""
     user, _ = _create_and_login(client)
     me_res = client.get(
         "/api/v1/user/me",
         headers={"X-User-Name": user["username"], "X-User-Token": user["password"]},
     )
     assert me_res.status_code == 200
-    assert me_res.json().get("tier") == "free"
+    assert me_res.json().get("tier") == "premium"
+

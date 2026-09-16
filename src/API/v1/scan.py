@@ -9,6 +9,9 @@ from src.Auth.identity import Identity, get_scoped_identity, get_sse_identity
 from src.Auth.rate_limiter import rate_limit
 from src.Infrastructure.logger import get_logger
 from src.Models.schemas import BulkBatchStatusResponse, BulkJobCreateResponse, Receipt, ScanContext, ScanResponse
+from supabase import AsyncClient
+from src.Infrastructure.database import get_supabase_client
+from src.Models.Users.user_repository import UserRepository
 from src.Services.extraction_service import (
     ExtractionService,
     FRIENDLY_ERROR_MESSAGE,
@@ -41,6 +44,7 @@ async def get_extraction_service() -> ExtractionService:
 async def process_batch_worker(
     batch_id: str,
     job_items: list[tuple[str, str, bytes, str]],  # [(job_id, filename, image_bytes, content_type)]
+    tier: str = "free",
 ) -> None:
     """Background worker that processes a batch of receipt jobs sequentially.
 
@@ -55,17 +59,16 @@ async def process_batch_worker(
         return
 
     service = ExtractionService()
-    batch_meta_key = f"batch:{batch_id}:meta"
-    start_time = asyncio.get_event_loop().time()
     settings = get_settings()
+    batch_meta_key = f"batch:{batch_id}:meta"
 
     for index, (job_id, filename, image_bytes, content_type) in enumerate(job_items):
         job_key = f"job:{job_id}"
 
-        # Check overall timeout limit
-        elapsed = asyncio.get_event_loop().time() - start_time
-        if elapsed >= settings.sse_batch_timeout_seconds:
-            logger.warning("Batch %s worker timed out after %.2fs. Failing remaining jobs.", batch_id, elapsed)
+        # Check if the batch has been cancelled before processing next item
+        batch_status = await redis_client.hget(batch_meta_key, "status")
+        if batch_status == "CANCELLED":
+            logger.info("Batch %s cancelled. Halting remaining jobs.", batch_id)
             for rem_job_id, _, _, _ in job_items[index:]:
                 await redis_client.hset(
                     f"job:{rem_job_id}",
@@ -78,12 +81,13 @@ async def process_batch_worker(
 
         # Step 1: Set status to PROCESSING
         logger.info(
-            "Worker processing started for job %s (index %d/%d, batch %s, file=%s)",
+            "Worker processing started for job %s (index %d/%d, batch %s, file=%s, tier=%s)",
             job_id,
             index + 1,
             len(job_items),
             batch_id,
             filename,
+            tier,
         )
         await redis_client.hset(job_key, "status", "PROCESSING")
 
@@ -93,6 +97,7 @@ async def process_batch_worker(
                 content_type=content_type,
                 user_id=None,
                 device_id=None,
+                tier=tier,
             )
             receipt: Receipt = await service.extract_from_image(context)
 
@@ -189,6 +194,7 @@ async def parse_receipt(
     image: UploadFile = File(..., description="Receipt or financial statement image file (JPEG, PNG, WEBP, etc.)"),
     identity: Identity = Depends(get_scoped_identity),
     service: ExtractionService = Depends(get_extraction_service),
+    db: AsyncClient = Depends(get_supabase_client),
 ) -> ScanResponse:
     """[DEPRECATED] Accept a multipart receipt/financial statement image upload and return AI-extracted structured data.
 
@@ -201,9 +207,10 @@ async def parse_receipt(
         identity.user_id,
         identity.device_id,
     )
+    user_repo = UserRepository(db)
     from src.Services.quota_service import get_quota_service
     quota_svc = get_quota_service()
-    allowed, q_status, err_msg = await quota_svc.check_scan_quota(identity, count=1)
+    allowed, q_status, err_msg = await quota_svc.check_scan_quota(identity, count=1, user_repo=user_repo)
     if not allowed:
         logger.warning("Scan quota exceeded for identity (%s): %s", identity.user_id or identity.device_id, err_msg)
         raise HTTPException(
@@ -238,6 +245,7 @@ async def parse_receipt(
             content_type=content_type,
             user_id=identity.user_id,
             device_id=identity.device_id,
+            tier=q_status.get("tier", "free"),
         )
 
         receipt = await service.extract_from_image(context)
@@ -319,6 +327,7 @@ async def parse_many_receipts(
         description="Array of 1 to 10 receipt image files (JPEG, PNG, WEBP, etc.)",
     ),
     identity: Identity = Depends(get_scoped_identity),
+    db: AsyncClient = Depends(get_supabase_client),
 ) -> BulkJobCreateResponse:
     """Accept multipart/form-data receipt files (1 to 10 images), dispatch background processing jobs,
     and immediately return batch_id and job_id mappings.
@@ -348,9 +357,10 @@ async def parse_many_receipts(
         )
 
     # Enforce daily scan quota
+    user_repo = UserRepository(db)
     from src.Services.quota_service import get_quota_service
     quota_svc = get_quota_service()
-    allowed, q_status, err_msg = await quota_svc.check_scan_quota(identity, count=len(files))
+    allowed, q_status, err_msg = await quota_svc.check_scan_quota(identity, count=len(files), user_repo=user_repo)
     if not allowed:
         logger.warning(
             "Bulk scan quota exceeded for identity (%s): requested=%d, error=%s",
@@ -415,8 +425,8 @@ async def parse_many_receipts(
             })
 
         # Schedule batch worker to process jobs sequentially and handle provider halts
-        background_tasks.add_task(process_batch_worker, batch_id, job_items)
-        await quota_svc.consume_scan_quota(identity, count=len(files))
+        background_tasks.add_task(process_batch_worker, batch_id, job_items, q_status.get("tier", "free"))
+        await quota_svc.consume_scan_quota(identity, count=len(files), user_repo=user_repo)
 
         await redis_client.expire(batch_key, settings.redis_job_ttl_seconds)
 

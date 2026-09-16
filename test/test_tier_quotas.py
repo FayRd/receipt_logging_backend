@@ -27,28 +27,41 @@ def _unique_user(tier: str = "free") -> dict:
 
 
 def test_get_quota_guest(client, mock_device):
-    """Guest session defaults to Free tier with 10 scans and 10k tokens."""
+    """Guest session defaults to Free tier with 5 scans and 5k tokens."""
     res = client.get("/api/v1/user/quota", headers=mock_device["guest_scan_headers"])
     assert res.status_code == 200
     data = res.json()
     assert data["tier"] == "free"
-    assert data["scan"]["limit"] == 10
+    assert data["scan"]["limit"] == 5
     assert data["scan"]["used"] == 0
-    assert data["scan"]["remaining"] == 10
+    assert data["scan"]["remaining"] == 5
     assert data["scan"]["is_exhausted"] is False
-    assert data["chat"]["limit"] == 10000
+    assert data["chat"]["limit"] == 5000
     assert data["chat"]["used"] == 0
-    assert data["chat"]["remaining"] == 10000
+    assert data["chat"]["remaining"] == 5000
     assert data["chat"]["is_exhausted"] is False
     assert data["seconds_to_reset"] > 0
     assert "h " in data["reset_countdown"]
 
 
-def test_get_quota_free_user(client):
-    """Authenticated free user receives 10 scans / 10k chat tokens limit."""
+def test_get_quota_free_user(client, monkeypatch):
+    """Authenticated free user receives 5 scans / 5k chat tokens limit."""
     user = _unique_user("free")
     create_res = client.post("/api/v1/user/create", json=user)
     assert create_res.status_code == 201
+
+    from src.Models.Users.user_repository import UserRepository
+    orig_get = UserRepository.get_by_id
+
+    # Mock tier to "free" to test free tier behavior (since new signups get 14d reverse trial)
+    async def mock_get_free(self, uid):
+        u = await orig_get(self, uid)
+        if u:
+            u = dict(u)
+            u["tier"] = "free"
+        return u
+
+    monkeypatch.setattr(UserRepository, "get_by_id", mock_get_free)
 
     headers = {
         "X-Request-Type": "user",
@@ -59,8 +72,8 @@ def test_get_quota_free_user(client):
     assert res.status_code == 200
     data = res.json()
     assert data["tier"] == "free"
-    assert data["scan"]["limit"] == 10
-    assert data["chat"]["limit"] == 10000
+    assert data["scan"]["limit"] == 5
+    assert data["chat"]["limit"] == 5000
 
 
 def test_get_quota_premium_and_dev_tiers(client, monkeypatch):
@@ -117,7 +130,7 @@ import asyncio
 
 @patch("src.Services.extraction_service.ExtractionService.extract_from_image", new_callable=AsyncMock)
 def test_scan_quota_exceeded_rejection(mock_extract, client, mock_device):
-    """Exceeding 10 scans on free tier returns HTTP 429 with reset countdown."""
+    """Exceeding 5 scans on free tier returns HTTP 429 with reset countdown."""
     mock_receipt = Receipt(
         merchant_name="Store",
         date="2026-08-28",
@@ -126,21 +139,21 @@ def test_scan_quota_exceeded_rejection(mock_extract, client, mock_device):
     )
     mock_extract.return_value = mock_receipt
 
-    # Use up 10 scans
-    for i in range(10):
+    # Use up 5 scans
+    for i in range(5):
         asyncio.run(limiter.reset())
         img_bytes = b"fake_image_bytes_" + str(i).encode()
         files = {"image": ("receipt.jpg", io.BytesIO(img_bytes), "image/jpeg")}
         res = client.post("/api/v1/scan/parse", files=files, headers=mock_device["guest_scan_headers"])
         assert res.status_code == 200
 
-    # 11th scan should fail with 429
+    # 6th scan should fail with 429
     asyncio.run(limiter.reset())
     img_bytes = b"fake_image_bytes_overflow"
     files = {"image": ("receipt.jpg", io.BytesIO(img_bytes), "image/jpeg")}
     res_overflow = client.post("/api/v1/scan/parse", files=files, headers=mock_device["guest_scan_headers"])
     assert res_overflow.status_code == 429
-    assert "Daily scan quota reached (10/10)" in res_overflow.json()["detail"]
+    assert "Daily scan quota reached (5/5)" in res_overflow.json()["detail"]
     assert "00:00 UTC" in res_overflow.json()["detail"]
     assert "Retry-After" in res_overflow.headers
 
@@ -156,8 +169,8 @@ def test_bulk_scan_upfront_quota_check(mock_extract, client, mock_device):
     )
     mock_extract.return_value = mock_receipt
 
-    # Consume 8 scans via single parse endpoint so 2 remain
-    for i in range(8):
+    # Consume 3 scans via single parse endpoint so 2 remain out of 5
+    for i in range(3):
         asyncio.run(limiter.reset())
         img_bytes = b"pre_scan_" + str(i).encode()
         files = {"image": ("receipt.jpg", io.BytesIO(img_bytes), "image/jpeg")}
@@ -177,10 +190,10 @@ def test_bulk_scan_upfront_quota_check(mock_extract, client, mock_device):
 
 @patch("src.Services.chat_service.ChatService.generate_response_local", new_callable=AsyncMock)
 def test_chat_token_quota_enforcement(mock_chat, client, mock_device):
-    """Chat queries consume tokens and reject with 429 once 10k token limit is reached."""
-    mock_chat.return_value = ("Here is your spending analysis.", 4000)
+    """Chat queries consume tokens and reject with 429 once 5k token limit is reached."""
+    mock_chat.return_value = ("Here is your spending analysis.", 2000)
 
-    # First turn: 4000 tokens
+    # First turn: 2000 tokens
     asyncio.run(limiter.reset())
     res1 = client.post(
         "/api/v1/chat/query",
@@ -189,7 +202,7 @@ def test_chat_token_quota_enforcement(mock_chat, client, mock_device):
     )
     assert res1.status_code == 200
 
-    # Second turn: 4000 tokens (8000 used)
+    # Second turn: 2000 tokens (4000 used)
     asyncio.run(limiter.reset())
     res2 = client.post(
         "/api/v1/chat/query",
@@ -198,7 +211,7 @@ def test_chat_token_quota_enforcement(mock_chat, client, mock_device):
     )
     assert res2.status_code == 200
 
-    # Third turn: 4000 tokens (12000 used -> exceeds limit)
+    # Third turn: 2000 tokens (6000 used -> exceeds 5000 limit)
     asyncio.run(limiter.reset())
     res3 = client.post(
         "/api/v1/chat/query",
@@ -231,8 +244,8 @@ def test_scan_and_chat_quotas_are_independent(mock_chat, mock_extract, client, m
     )
     mock_extract.return_value = mock_receipt
 
-    # Exhaust all 10 scans via single parse endpoint
-    for i in range(10):
+    # Exhaust all 5 scans via single parse endpoint
+    for i in range(5):
         asyncio.run(limiter.reset())
         img_bytes = b"scan_exhaust_" + str(i).encode()
         files = {"image": ("receipt.jpg", io.BytesIO(img_bytes), "image/jpeg")}
@@ -273,8 +286,8 @@ def test_guest_and_user_quota_isolation(mock_extract, client, mock_device):
     create_res = client.post("/api/v1/user/create", json=user)
     assert create_res.status_code == 201
 
-    # 2. Exhaust guest quota (10 scans)
-    for i in range(10):
+    # 2. Exhaust guest quota (5 scans)
+    for i in range(5):
         asyncio.run(limiter.reset())
         img_bytes = b"guest_scan_" + str(i).encode()
         files = {"image": ("receipt.jpg", io.BytesIO(img_bytes), "image/jpeg")}
@@ -285,10 +298,10 @@ def test_guest_and_user_quota_isolation(mock_extract, client, mock_device):
     asyncio.run(limiter.reset())
     guest_q = client.get("/api/v1/user/quota", headers=mock_device["guest_scan_headers"])
     assert guest_q.status_code == 200
-    assert guest_q.json()["scan"]["used"] == 10
+    assert guest_q.json()["scan"]["used"] == 5
     assert guest_q.json()["scan"]["is_exhausted"] is True
 
-    # 4. User logs in and checks quota: should be completely fresh (0 used)
+    # 4. User logs in and checks quota: should be completely fresh (0 used, 14-day trial)
     user_headers = {
         "X-Request-Type": "user",
         "X-User-Name": user["username"],
@@ -298,7 +311,7 @@ def test_guest_and_user_quota_isolation(mock_extract, client, mock_device):
     user_q = client.get("/api/v1/user/quota", headers=user_headers)
     assert user_q.status_code == 200
     assert user_q.json()["scan"]["used"] == 0
-    assert user_q.json()["scan"]["remaining"] == 10
+    assert user_q.json()["scan"]["remaining"] == 50
     assert user_q.json()["scan"]["is_exhausted"] is False
 
     # 5. User can scan successfully
@@ -307,4 +320,5 @@ def test_guest_and_user_quota_isolation(mock_extract, client, mock_device):
     files = {"image": ("receipt.jpg", io.BytesIO(img_bytes), "image/jpeg")}
     res_user_scan = client.post("/api/v1/scan/parse", files=files, headers=user_headers)
     assert res_user_scan.status_code == 200
+
 

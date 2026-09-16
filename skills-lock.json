@@ -7,11 +7,23 @@
       "skillPath": "skills/pages/legal/cookie-policy/SKILL.md",
       "computedHash": "81d1124fcff1f750190f6372077510862d41a57d3c32406acfd39c3dc85d1034"
     },
+    "customer-billing-ops": {
+      "source": "affaan-m/ECC",
+      "sourceType": "github",
+      "skillPath": "skills/customer-billing-ops/SKILL.md",
+      "computedHash": "6e545e36eb3c83a82f4d004957009421de370b771ffe4e5aa3bdd1239c2a429f"
+    },
     "legal-page-generator": {
       "source": "kostja94/marketing-skills",
       "sourceType": "github",
       "skillPath": "skills/pages/legal/legal/SKILL.md",
       "computedHash": "8992f0416468003ba98909da04e8badd8575e1658c838cbe1280c61cc1208953"
+    },
+    "play-billing-library-version-upgrade": {
+      "source": "android/skills",
+      "sourceType": "github",
+      "skillPath": "play/play-billing-library-version-upgrade/SKILL.md",
+      "computedHash": "4e356409d07fabe22b71fe8b5ead3f1ee91186345e3cd19f943df009015b0593"
     },
     "privacy-page-generator": {
       "source": "kostja94/marketing-skills",
@@ -30,6 +42,12 @@
       "sourceType": "github",
       "skillPath": "skills/pages/legal/shipping/SKILL.md",
       "computedHash": "c3883ecf349be1b8a31b7b62796b88ba1a0641578e17299591f92ebb964e4106"
+    },
+    "storekit": {
+      "source": "Prisma-Labs-Dev/apple-skills",
+      "sourceType": "github",
+      "skillPath": "skills/storekit/SKILL.md",
+      "computedHash": "10af7495c13169e3420bc9e6dbe6f75ecf9d157d0cb998e436912d970ed03329"
     },
     "supabase": {
       "source": "supabase/agent-skills",

@@ -184,9 +184,15 @@ class ExtractionService:
         """Send the image to Google GenAI (Gemini) Vision and return a structured Receipt.
 
         Uses the Gemini SDK's native response_schema enforcement to ensure JSON conformance.
+        Free tier uses the lightweight/cheaper vision model; Premium/Dev use the fast flagship model.
         """
+        model_name = self.settings.gemini_vision_model
+        if getattr(context, "tier", "free") == "free" and getattr(self.settings, "gemini_vision_model_free", ""):
+            model_name = self.settings.gemini_vision_model_free
+
+        logger.info("Executing Gemini vision extraction using model: %s (tier=%s)", model_name, getattr(context, "tier", "free"))
         response = await self._gemini_client.aio.models.generate_content(
-            model=self.settings.gemini_vision_model,
+            model=model_name,
             contents=[
                 types.Part.from_bytes(
                     data=context.image_bytes,

@@ -32,7 +32,7 @@ echo "Swagger docs: http://localhost:$PORT/docs"
 if [ -n "$LOGFIRE_TOKEN" ]; then
     echo "Logfire Dashboard: https://logfire.pydantic.dev"
 elif [ -n "$OTEL_EXPORTER_OTLP_ENDPOINT" ]; then
-    echo "Local Dashboard (Jaeger): http://localhost:16686"
+    echo "Local Dashboard (Jaeger): http://localhost:${JAEGER_UI_PORT:-16686}"
 else
     echo "Console Logging: Active (Set LOGFIRE_TOKEN in .env for web dashboard)"
 fi

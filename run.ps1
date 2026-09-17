@@ -17,7 +17,8 @@ Write-Host "Swagger docs: http://localhost:$PORT/docs" -ForegroundColor Green
 if ($env:LOGFIRE_TOKEN) {
     Write-Host "Logfire Dashboard: https://logfire.pydantic.dev" -ForegroundColor Yellow
 } elseif ($env:OTEL_EXPORTER_OTLP_ENDPOINT) {
-    Write-Host "Local Dashboard (Jaeger): http://localhost:16686" -ForegroundColor Yellow
+    $jaegerUiPort = if ($env:JAEGER_UI_PORT) { $env:JAEGER_UI_PORT } else { 16686 }
+    Write-Host "Local Dashboard (Jaeger): http://localhost:$jaegerUiPort" -ForegroundColor Yellow
 } else {
     Write-Host "Console Logging: Active (Set LOGFIRE_TOKEN in .env for web dashboard)" -ForegroundColor Gray
 }

@@ -60,7 +60,7 @@ services:
       - JWT_ALGORITHM=${JWT_ALGORITHM:-HS256}
       - JWT_ACCESS_TOKEN_EXPIRE_MINUTES=${JWT_ACCESS_TOKEN_EXPIRE_MINUTES:-15}
       - JWT_REFRESH_TOKEN_EXPIRE_DAYS=${JWT_REFRESH_TOKEN_EXPIRE_DAYS:-30}
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
+      - OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT:-http://jaeger:4318}
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:${PORT:-8085}/api/v1/health/ || exit 1"]
       interval: 30s
@@ -74,4 +74,4 @@ services:
     restart: unless-stopped
     ports:
       - "${JAEGER_UI_PORT:-16686}:16686" # Jaeger Web UI
-      - "${JAEGER_OTLP_PORT:-4318}:4318"   # OTLP HTTP Receiver
+      - "${JAEGER_OTLP_PORT:-${JAEGER_OLTP_PORT:-4318}}:4318"   # OTLP HTTP Receiver

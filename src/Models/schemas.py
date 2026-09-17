@@ -91,8 +91,8 @@ class ScanContext:
     """Internal dataclass carrying the parsed multipart upload fields."""
     image_bytes: bytes
     content_type: str
-    user_id: str | None
-    device_id: str | None
+    user_id: str | None = None
+    device_id: str | None = None
     tier: str = "free"
 
 

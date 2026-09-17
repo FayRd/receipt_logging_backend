@@ -75,13 +75,14 @@ class ChatService:
             return ""
         return text.replace("<", "&lt;").replace(">", "&gt;")
 
-    async def _call_gemini(self, formatted_contents: list) -> tuple[str, int]:
+    async def _call_gemini(self, formatted_contents: list, model: str | None = None) -> tuple[str, int]:
         """Send a content list to the configured Gemini chat model and return (response_text, tokens).
 
         Uses the Google GenAI async SDK with the session-scoped Gemini client.
         """
+        chosen_model = model or self.settings.gemini_chat_model
         response = await self._gemini_client.aio.models.generate_content(
-            model=self.settings.gemini_chat_model,
+            model=chosen_model,
             contents=formatted_contents,
         )
         usage = getattr(response, "usage_metadata", None)
@@ -94,22 +95,24 @@ class ChatService:
         if tokens <= 0:
             tokens = max(1, len(text) // 4)
         logger.info(
-            "Gemini chat response generated. Output len=%d, total_tokens=%d, usage_metadata=%s",
+            "Gemini chat response generated. Output len=%d, total_tokens=%d, model=%s, usage_metadata=%s",
             len(text),
             tokens,
+            chosen_model,
             usage,
         )
         return text, tokens
 
-    async def _call_openrouter(self, messages: list[dict]) -> tuple[str, int]:
+    async def _call_openrouter(self, messages: list[dict], model: str | None = None) -> tuple[str, int]:
         """Send a messages list to the configured OpenRouter chat model and return (response_text, tokens).
 
         Uses the OpenAI-compatible chat completions REST API via async httpx.
         The same receipt context, prompt-injection sanitization, and history windowing
         rules apply as with the Gemini path.
         """
+        chosen_model = model or self.settings.openrouter_chat_model
         payload = {
-            "model": self.settings.openrouter_chat_model,
+            "model": chosen_model,
             "messages": messages,
         }
         resp = await self._http_client.post("/chat/completions", content=json.dumps(payload))
@@ -121,7 +124,7 @@ class ChatService:
             "OpenRouter chat response generated. Output len=%d, total_tokens=%d, model=%s",
             len(text),
             tokens,
-            self.settings.openrouter_chat_model,
+            chosen_model,
         )
         return text, tokens
 
@@ -219,21 +222,35 @@ class ChatService:
         identity: Identity,
         user_message: str,
         history_messages: list[dict],
+        tier: str = "free",
     ) -> tuple[str, int]:
         """Retrieve identity-scoped receipts for RAG context and call the configured AI provider.
 
         Returns (response_text, tokens_used).
         """
         provider = self.settings.effective_ai_provider
-        model_name = (
-            self.settings.gemini_chat_model
-            if provider == "gemini"
-            else self.settings.openrouter_chat_model
-        )
+        is_free_tier = tier.lower() == "free"
+        if provider == "gemini":
+            model_name = (
+                self.settings.gemini_chat_model_free
+                if is_free_tier and self.settings.gemini_chat_model_free
+                else self.settings.gemini_chat_model
+            )
+        else:
+            if is_free_tier:
+                model_name = self.settings.openrouter_chat_model_free
+                if not model_name:
+                    raise ValueError(
+                        "OPENROUTER_CHAT_MODEL_FREE must be configured in .env for Free tier OpenRouter chat"
+                    )
+            else:
+                model_name = self.settings.openrouter_chat_model
+
         logger.debug(
-            "generate_response called: provider=%s, model=%s, user_id=%s, device_id=%s, msg_len=%d, history_count=%d",
+            "generate_response called: provider=%s, model=%s (tier=%s), user_id=%s, device_id=%s, msg_len=%d, history_count=%d",
             provider,
             model_name,
+            tier,
             identity.user_id,
             identity.device_id,
             len(user_message),
@@ -262,9 +279,10 @@ class ChatService:
             sanitized_user_msg = self._sanitize_string(user_message)
 
             logger.info(
-                "Triggering %s chat model %s with history_count=%d (context block len=%d)",
+                "Triggering %s chat model %s (tier=%s) with history_count=%d (context block len=%d)",
                 provider,
                 model_name,
+                tier,
                 len(history_window),
                 len(context_block),
             )
@@ -280,7 +298,7 @@ class ChatService:
                         types.Part.from_text(text=f"{role_prefix}{sanitized_content}")
                     )
                 formatted_contents.append(types.Part.from_text(text=f"User: {sanitized_user_msg}"))
-                return await self._call_gemini(formatted_contents)
+                return await self._call_gemini(formatted_contents, model=model_name)
 
             else:
                 # OpenRouter: build OpenAI-compatible messages list (system + alternating user/assistant)
@@ -289,7 +307,7 @@ class ChatService:
                     role = "user" if m["sender"] == "user" else "assistant"
                     messages.append({"role": role, "content": self._sanitize_string(m["content"])})
                 messages.append({"role": "user", "content": sanitized_user_msg})
-                return await self._call_openrouter(messages)
+                return await self._call_openrouter(messages, model=model_name)
 
         except Exception as e:
             logger.error("Failed to generate chat response via %s: %s", provider, e, exc_info=True)
@@ -301,21 +319,35 @@ class ChatService:
         user_message: str,
         conversation_history: list,
         recent_receipts: list,
+        tier: str = "free",
     ) -> tuple[str, int]:
         """Generate an AI response for local/guest store mode using the configured AI provider.
 
         Returns (response_text, tokens_used).
         """
         provider = self.settings.effective_ai_provider
-        model_name = (
-            self.settings.gemini_chat_model
-            if provider == "gemini"
-            else self.settings.openrouter_chat_model
-        )
+        is_free_tier = tier.lower() == "free"
+        if provider == "gemini":
+            model_name = (
+                self.settings.gemini_chat_model_free
+                if is_free_tier and self.settings.gemini_chat_model_free
+                else self.settings.gemini_chat_model
+            )
+        else:
+            if is_free_tier:
+                model_name = self.settings.openrouter_chat_model_free
+                if not model_name:
+                    raise ValueError(
+                        "OPENROUTER_CHAT_MODEL_FREE must be configured in .env for Free tier OpenRouter chat"
+                    )
+            else:
+                model_name = self.settings.openrouter_chat_model
+
         logger.debug(
-            "generate_response_local called: provider=%s, model=%s, user_id=%s, device_id=%s, msg_len=%d, history_count=%d, local_receipts_count=%d",
+            "generate_response_local called: provider=%s, model=%s (tier=%s), user_id=%s, device_id=%s, msg_len=%d, history_count=%d, local_receipts_count=%d",
             provider,
             model_name,
+            tier,
             identity.user_id,
             identity.device_id,
             len(user_message),
@@ -329,9 +361,10 @@ class ChatService:
             sanitized_user_msg = self._sanitize_string(user_message)
 
             logger.info(
-                "Triggering %s local chat model %s with history_count=%d (context block len=%d)",
+                "Triggering %s local chat model %s (tier=%s) with history_count=%d (context block len=%d)",
                 provider,
                 model_name,
+                tier,
                 len(conversation_history),
                 len(context_block),
             )
@@ -348,7 +381,7 @@ class ChatService:
                         types.Part.from_text(text=f"{role_prefix}{sanitized_content}")
                     )
                 formatted_contents.append(types.Part.from_text(text=f"User: {sanitized_user_msg}"))
-                return await self._call_gemini(formatted_contents)
+                return await self._call_gemini(formatted_contents, model=model_name)
 
             else:
                 # OpenRouter: build OpenAI-compatible messages list (system + alternating user/assistant)
@@ -357,7 +390,7 @@ class ChatService:
                     role = "user" if m.role == "user" else "assistant"
                     messages.append({"role": role, "content": self._sanitize_string(m.content)})
                 messages.append({"role": "user", "content": sanitized_user_msg})
-                return await self._call_openrouter(messages)
+                return await self._call_openrouter(messages, model=model_name)
 
         except Exception as e:
             logger.error("Failed to generate local chat response via %s: %s", provider, e, exc_info=True)

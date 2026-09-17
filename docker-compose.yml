@@ -25,7 +25,9 @@ services:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
       - OPENROUTER_VISION_MODEL=${OPENROUTER_VISION_MODEL:-google/gemini-2.5-flash}
-      - OPENROUTER_CHAT_MODEL=${OPENROUTER_CHAT_MODEL:-google/gemini-2.5-flash}
+      - OPENROUTER_CHAT_MODEL=${OPENROUTER_CHAT_MODEL:-deepseek/deepseek-v4-flash-0731}
+      - OPENROUTER_VISION_MODEL_FREE=${OPENROUTER_VISION_MODEL_FREE:-qwen/qwen3.7-flash}
+      - OPENROUTER_CHAT_MODEL_FREE=${OPENROUTER_CHAT_MODEL_FREE:-deepseek/deepseek-v4-flash-0731}
       - LOGFIRE_TOKEN=${LOGFIRE_TOKEN:-}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-["http://localhost","http://localhost:3000","http://localhost:8085"]}
       - RATE_LIMIT_ENABLED=${RATE_LIMIT_ENABLED:-true}

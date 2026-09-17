@@ -197,6 +197,12 @@ async def send_chat_query(
 
     # ── Cloud Store Mode (Authenticated User) ──────────────────────────────────
     if identity.is_authenticated:
+        user_tier = "free"
+        if user_repo and identity.user_id:
+            user_data = await user_repo.get_by_id(identity.user_id)
+            if user_data and user_data.get("tier"):
+                user_tier = str(user_data.get("tier")).lower()
+
         if body.conversation_id:
             conv = await repo.get_conversation(body.conversation_id, identity)
             if not conv:
@@ -217,10 +223,10 @@ async def send_chat_query(
             conv_id = None
             history_messages = []
 
-        # Generate Gemini response with identity-scoped receipt context FIRST
+        # Generate AI response with identity-scoped receipt context FIRST
         try:
             gen_res = await service.generate_response(
-                identity, body.message, history_messages
+                identity, body.message, history_messages, tier=user_tier
             )
             if isinstance(gen_res, tuple):
                 ai_response_text, tokens_used = gen_res
@@ -235,7 +241,7 @@ async def send_chat_query(
                 detail="Failed to generate AI response. Please try again.",
             )
 
-        # Only after Gemini succeeds, create new conversation if first turn
+        # Only after AI succeeds, create new conversation if first turn
         if not conv_id:
             conv = await repo.create_conversation(identity, title="New Conversation")
             conv_id = conv["id"]
@@ -269,6 +275,7 @@ async def send_chat_query(
             user_message=body.message,
             conversation_history=body.conversation_history,
             recent_receipts=body.receipts,
+            tier="free",
         )
         if isinstance(gen_res, tuple):
             ai_response_text, tokens_used = gen_res

@@ -519,8 +519,8 @@ class UserRepository:
             logger.error("Failed to set trial start for user_id=%s: %s", user_id, e, exc_info=True)
             raise
 
-    async def set_tier(self, user_id: str, tier: str) -> dict | None:
-        """Update the user's subscription tier ('free', 'premium', 'dev')."""
+    async def set_tier(self, user_id: str, tier: str, updated_preferences: dict | None = None) -> dict | None:
+        """Update the user's subscription tier ('free', 'premium', 'dev') and preferences."""
         start_time = time.perf_counter()
         clean_tier = tier.strip().lower()
         now = datetime.now(timezone.utc).isoformat()
@@ -530,7 +530,14 @@ class UserRepository:
                 return None
 
             prefs = user.get("preferences") or {}
-            if clean_tier != "premium":
+            if updated_preferences:
+                prefs.update(updated_preferences)
+
+            if clean_tier == "premium":
+                prefs["is_in_trial"] = False
+                prefs["discount_offer_claimed"] = True
+                prefs["discount_offer_shown_at"] = None
+            else:
                 prefs["is_in_trial"] = False
 
             res = await (
@@ -556,7 +563,9 @@ class UserRepository:
             raise
 
     async def set_discount_offer_shown(self, user_id: str) -> dict | None:
-        """Record timestamp when the 7-day downgrade discount offer was first triggered."""
+        """Record timestamp when the 7-day downgrade discount offer was first triggered.
+        Guarded: Only applies to users who actually completed the 14-day trial.
+        """
         now = datetime.now(timezone.utc)
         try:
             user = await self.get_by_id(user_id)
@@ -564,6 +573,11 @@ class UserRepository:
                 return None
 
             prefs = user.get("preferences") or {}
+            # Guard: User must have had a trial, must not be trial ineligible, and must not have already claimed discount
+            if not prefs.get("trial_start_at") or prefs.get("trial_ineligible", False) or prefs.get("discount_offer_claimed", False):
+                logger.info("Skipping discount offer for ineligible user_id=%s", user_id)
+                return user
+
             if not prefs.get("discount_offer_shown_at"):
                 prefs["discount_offer_shown_at"] = now.isoformat()
                 res = await (

@@ -300,6 +300,88 @@ def test_chat_query_openrouter_guest_mode(mock_gen, client, mock_device):
     assert mock_gen.called
 
 
+@pytest.mark.anyio
+async def test_chat_service_openrouter_tier_model_selection():
+    from src.Services.chat_service import ChatService
+    from src.Auth.identity import Identity
+
+    db = AsyncMock()
+    service = ChatService(db)
+    service.settings.ai_provider = "openrouter"
+    service.settings.openrouter_chat_model = "deepseek/deepseek-v4-flash-0731"
+    service.settings.openrouter_chat_model_free = "qwen/qwen3.7-flash"
+
+    identity = Identity(user_id="u1", is_authenticated=True)
+
+    with patch.object(service.receipt_repo, "get_all_by_identity", new_callable=AsyncMock) as mock_receipts, \
+         patch.object(service, "_call_openrouter", new_callable=AsyncMock) as mock_call:
+        mock_receipts.return_value = []
+        mock_call.return_value = ("AI response", 10)
+
+        # Free tier
+        await service.generate_response(identity, "hi", [], tier="free")
+        assert mock_call.call_args.kwargs["model"] == "qwen/qwen3.7-flash"
+
+        # Premium tier
+        await service.generate_response(identity, "hi", [], tier="premium")
+        assert mock_call.call_args.kwargs["model"] == "deepseek/deepseek-v4-flash-0731"
+
+
+@pytest.mark.anyio
+async def test_chat_service_openrouter_free_model_missing_raises_error():
+    from src.Services.chat_service import ChatService
+    from src.Auth.identity import Identity
+
+    db = AsyncMock()
+    service = ChatService(db)
+    service.settings.ai_provider = "openrouter"
+    service.settings.openrouter_chat_model = "deepseek/deepseek-v4-flash-0731"
+    service.settings.openrouter_chat_model_free = ""
+
+    identity = Identity(user_id="u1", is_authenticated=True)
+
+    with patch.object(service.receipt_repo, "get_all_by_identity", new_callable=AsyncMock) as mock_receipts:
+        mock_receipts.return_value = []
+        with pytest.raises(ValueError, match="OPENROUTER_CHAT_MODEL_FREE"):
+            await service.generate_response(identity, "hi", [], tier="free")
+
+
+@pytest.mark.anyio
+async def test_extraction_service_openrouter_tier_model_selection():
+    import json
+    from src.Services.extraction_service import ExtractionService
+    from src.Models.schemas import ScanContext
+
+    service = ExtractionService()
+    service.settings.ai_provider = "openrouter"
+    service.settings.openrouter_vision_model = "google/gemini-2.5-flash-lite"
+    service.settings.openrouter_vision_model_free = "qwen/qwen3.7-flash"
+    service._http_client = AsyncMock()
+    mock_resp = AsyncMock()
+    mock_resp.json = lambda: {"choices": [{"message": {"content": "{}"}}]}
+    mock_resp.raise_for_status = lambda: None
+    service._http_client.post.return_value = mock_resp
+
+    # Free tier
+    ctx_free = ScanContext(image_bytes=b"fake", content_type="image/jpeg", tier="free")
+    await service._extract_openrouter(ctx_free)
+    call_args_free = service._http_client.post.call_args
+    payload_free = json.loads(call_args_free.kwargs["content"])
+    assert payload_free["model"] == "qwen/qwen3.7-flash"
+
+    # Premium tier
+    ctx_prem = ScanContext(image_bytes=b"fake", content_type="image/jpeg", tier="premium")
+    await service._extract_openrouter(ctx_prem)
+    call_args_prem = service._http_client.post.call_args
+    payload_prem = json.loads(call_args_prem.kwargs["content"])
+    assert payload_prem["model"] == "google/gemini-2.5-flash-lite"
+
+    # Free tier missing model raises ValueError
+    service.settings.openrouter_vision_model_free = ""
+    with pytest.raises(ValueError, match="OPENROUTER_VISION_MODEL_FREE"):
+        await service._extract_openrouter(ctx_free)
+
+
 if __name__ == "__main__":
     import pytest
     import sys

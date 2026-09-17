@@ -1,7 +1,7 @@
 #!/usr/bin/env pwsh
 # run.ps1 — Start the Receipt Logger FastAPI backend & ARQ Queue Worker
 
-$PORT = 8085
+$PORT = if ($env:PORT) { $env:PORT } else { 8085 }
 $HOST_ADDR = "0.0.0.0"
 $VENV_UVICORN = ".venv\Scripts\uvicorn.exe"
 $VENV_ARQ = ".venv\Scripts\arq.exe"

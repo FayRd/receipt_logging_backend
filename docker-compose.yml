@@ -8,12 +8,12 @@ services:
     container_name: sancfund-backend
     restart: unless-stopped
     ports:
-      - "8085:8085"
+      - "${PORT:-8085}:${PORT:-8085}"
     env_file:
       - path: .env
         required: false
     environment:
-      - PORT=8085
+      - PORT=${PORT:-8085}
       - ENVIRONMENT=${ENVIRONMENT:-production}
       - SUPABASE_URL=${SUPABASE_URL}
       - SUPABASE_KEY=${SUPABASE_KEY}
@@ -62,7 +62,7 @@ services:
       - JWT_REFRESH_TOKEN_EXPIRE_DAYS=${JWT_REFRESH_TOKEN_EXPIRE_DAYS:-30}
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8085/api/v1/health/ || exit 1"]
+      test: ["CMD-SHELL", "curl -f http://localhost:${PORT:-8085}/api/v1/health/ || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 3

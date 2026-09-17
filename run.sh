@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # run.sh — Start the Receipt Logger FastAPI backend & ARQ Queue Worker
 
-PORT=8085
+PORT="${PORT:-8085}"
 HOST_ADDR="0.0.0.0"
 VENV_UVICORN=".venv/bin/uvicorn"
 VENV_ARQ=".venv/bin/arq"

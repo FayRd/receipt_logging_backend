@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: sancfund-backend
+    container_name: ${CONTAINER_NAME:-sancfund-backend}
     restart: unless-stopped
     ports:
       - "${PORT:-8085}:${PORT:-8085}"
@@ -70,8 +70,8 @@ services:
 
   jaeger:
     image: jaegertracing/all-in-one:latest
-    container_name: jaeger_dashboard
+    container_name: ${JAEGER_CONTAINER_NAME:-jaeger_dashboard}
     restart: unless-stopped
     ports:
-      - "16686:16686" # Jaeger Web UI
-      - "4318:4318"   # OTLP HTTP Receiver
+      - "${JAEGER_UI_PORT:-16686}:16686" # Jaeger Web UI
+      - "${JAEGER_OTLP_PORT:-4318}:4318"   # OTLP HTTP Receiver

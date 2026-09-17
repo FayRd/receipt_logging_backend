@@ -11,6 +11,7 @@ from src.Models.schemas import (
     DeviceRecord,
 )
 from src.Models.Devices.device_repository import DeviceRepository
+from src.Models.Users.user_repository import UserRepository
 from src.Services.data_migration_service import DataMigrationService
 
 router = APIRouter(prefix="/devices", tags=["Devices"])
@@ -189,4 +190,28 @@ async def rotate_device_token_endpoint(
         raise HTTPException(status_code=404, detail="Device record not found.")
     logger.info("Device token rotated successfully for device_name=%s", identity.device_name)
     return device
+
+
+# ── GET /devices/{device_name}/trial-status ──────────────────────────────────
+@router.get(
+    "/{device_name}/trial-status",
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_crud_per_minute))],
+)
+async def get_device_trial_status(
+    device_name: str,
+    db: AsyncClient = Depends(get_supabase_client),
+):
+    """Check whether a client hardware device has already consumed a 14-day reverse trial.
+
+    Public route for client boot check — helps UI hide trial gift banner after first redemption.
+    """
+    clean_name = device_name.strip()
+    user_repo = UserRepository(db)
+    trial_used = await user_repo.check_device_trial_used(clean_name)
+    return {
+        "device_name": clean_name,
+        "trial_used": trial_used,
+        "trial_eligible": not trial_used,
+    }
+
 

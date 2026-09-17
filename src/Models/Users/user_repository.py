@@ -423,6 +423,7 @@ class UserRepository:
             return False
         clean_device = device_id.strip()
         try:
+            # 1. Check users table preferences for trial_device_id
             res = await (
                 self.db.table(self.TABLE)
                 .select("id")
@@ -431,10 +432,54 @@ class UserRepository:
                 .limit(1)
                 .execute()
             )
-            return bool(res.data)
+            if res and res.data:
+                return True
+
+            # 2. Check devices table if device was registered and linked to an account
+            res_dev = await (
+                self.db.table("devices")
+                .select("id, user_id")
+                .eq("name", clean_device)
+                .not_.is_("user_id", "null")
+                .is_("deleted_at", "null")
+                .limit(1)
+                .execute()
+            )
+            if res_dev and res_dev.data:
+                return True
+
+            return False
         except Exception as e:
             logger.warning("Error checking device trial consumption for device=%s: %s", clean_device, e)
             return False
+
+    async def simulate_trial_expiry(self, user_id: str) -> dict | None:
+        """Simulate 14-day trial expiration by setting trial_start_at to 15 days ago and applying downgrade."""
+        user = await self.get_by_id(user_id)
+        if not user:
+            return None
+        prefs = dict(user.get("preferences") or {})
+        past_15_days = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()
+        prefs["trial_start_at"] = past_15_days
+        prefs["is_in_trial"] = True
+
+        # Update user with past trial start time
+        now_iso = datetime.now(timezone.utc).isoformat()
+        await (
+            self.db.table(self.TABLE)
+            .update({
+                "preferences": prefs,
+                "tier": "premium",
+                "updated_at": now_iso,
+            })
+            .eq("id", user_id)
+            .execute()
+        )
+
+        user["preferences"] = prefs
+        user["tier"] = "premium"
+        updated_user = await self.check_and_apply_trial_expiration(user)
+        return updated_user
 
     async def set_trial_start(self, user_id: str, device_id: str | None = None) -> dict | None:
         """Grant 14-day free reverse trial to user and record trial timestamp in preferences."""

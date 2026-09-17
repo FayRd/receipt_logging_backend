@@ -260,6 +260,44 @@ async def grant_ad_scan(
     )
 
 
+# ── POST /user/me/simulate-trial-expiry ────────────────────────────────────────
+@router.post(
+    "/me/simulate-trial-expiry",
+    response_model=UserStatsResponse,
+    summary="Debug/Test: Fast-forward trial timestamp to 15 days ago and apply downgrade to Free tier",
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_crud_per_minute))],
+)
+async def simulate_trial_expiry_endpoint(
+    identity: Identity = Depends(get_user_identity),
+    repo: UserRepository = Depends(get_repo),
+):
+    """Simulate 14-day trial expiration for developer testing and verify the downgrade workflow."""
+    settings = get_settings()
+    if settings.environment.lower() not in ("development", "dev"):
+        raise HTTPException(
+            status_code=403,
+            detail="Simulation endpoints are only available in development environment (ENVIRONMENT=development).",
+        )
+    logger.debug("Entering simulate_trial_expiry_endpoint: user_id=%s", identity.user_id)
+    updated_user = await repo.simulate_trial_expiry(identity.user_id)
+    if not updated_user:
+        raise HTTPException(status_code=404, detail="User account not found.")
+
+    stats = await repo.get_user_stats(identity.user_id)
+    return UserStatsResponse(
+        success=True,
+        total_receipts=stats["total_receipts"],
+        time_saved_seconds=stats["time_saved_seconds"],
+        time_saved_minutes=stats["time_saved_minutes"],
+        trial_start_at=stats.get("trial_start_at"),
+        discount_offer_shown_at=stats.get("discount_offer_shown_at"),
+        tier=stats.get("tier", "free"),
+        is_in_trial=stats.get("is_in_trial", False),
+        ad_scans_today=stats.get("ad_scans_today", 0),
+        ad_scans_remaining=stats.get("ad_scans_remaining", 5),
+    )
+
+
 # ── GET /user/me/avatar ───────────────────────────────────────────────────────
 @router.get(
     "/me/avatar",

@@ -70,15 +70,21 @@ async def get_subscription_status(
     discount_days_remaining = None
     is_discount_active = False
 
-    if discount_shown_str:
+    had_trial = (trial_start_str is not None) and not prefs.get("trial_ineligible", False)
+    offer_claimed = prefs.get("discount_offer_claimed", False)
+
+    if discount_shown_str and had_trial and not offer_claimed and tier == "free":
         try:
             discount_start = datetime.fromisoformat(discount_shown_str.replace("Z", "+00:00"))
             elapsed_discount = now - discount_start
             days_left = 7 - elapsed_discount.days
             discount_days_remaining = max(0, days_left)
-            is_discount_active = elapsed_discount <= timedelta(days=7) and tier == "free"
+            is_discount_active = elapsed_discount <= timedelta(days=7)
         except Exception as e:
             logger.warning("Error parsing discount_offer_shown_at '%s': %s", discount_shown_str, e)
+    elif discount_shown_str and not had_trial:
+        # Ineligible user who never had a trial; ignore any errant timestamp
+        discount_shown_str = None
 
     # 3. Ad scan quota
     ad_scans_today = prefs.get("ad_scans_today", 0) if prefs.get("ad_scans_date") == today_str else 0
@@ -126,14 +132,22 @@ async def sync_subscription(
     now = datetime.now(timezone.utc).isoformat()
 
     if body.is_premium:
-        prefs["subscription"] = {
+        subscription_pref = {
             "is_active": True,
             "product_id": body.product_identifier,
             "original_purchase_date": body.original_purchase_date,
             "expiration_date": body.expiration_date,
             "updated_at": now,
         }
-        await repo.set_tier(identity.user_id, "premium")
+        await repo.set_tier(
+            identity.user_id,
+            "premium",
+            updated_preferences={
+                "subscription": subscription_pref,
+                "discount_offer_claimed": True,
+                "discount_offer_shown_at": None,
+            },
+        )
     else:
         # User not paid premium in RevenueCat
         # Check if they still have active 14-day trial
@@ -149,7 +163,10 @@ async def sync_subscription(
 
         if not in_trial:
             await repo.set_tier(identity.user_id, "free")
-            await repo.set_discount_offer_shown(identity.user_id)
+            # Only trigger discount offer if user actually had a trial and is eligible
+            had_trial = (trial_start_str is not None) and not prefs.get("trial_ineligible", False)
+            if had_trial and not prefs.get("discount_offer_claimed", False):
+                await repo.set_discount_offer_shown(identity.user_id)
 
     return await get_subscription_status(identity=identity, repo=repo)
 
@@ -208,24 +225,35 @@ async def revenuecat_webhook(
     # https://www.revenuecat.com/docs/integrations/webhooks/event-types-and-fields
     if event_type in ("INITIAL_PURCHASE", "RENEWAL", "PRODUCT_CHANGE", "UNCANCELLATION"):
         logger.info("Granting Premium to user %s via webhook (%s)", app_user_id, event_type)
-        prefs["subscription"] = {
+        subscription_pref = {
             "is_active": True,
             "product_id": product_id,
             "last_event": event_type,
             "updated_at": now_iso,
         }
-        await repo.set_tier(app_user_id, "premium")
+        await repo.set_tier(
+            app_user_id,
+            "premium",
+            updated_preferences={
+                "subscription": subscription_pref,
+                "discount_offer_claimed": True,
+                "discount_offer_shown_at": None,
+            },
+        )
 
     elif event_type in ("CANCELLATION", "EXPIRATION"):
         logger.info("Downgrading user %s to Free via webhook (%s)", app_user_id, event_type)
-        prefs["subscription"] = {
+        subscription_pref = {
             "is_active": False,
             "product_id": product_id,
             "last_event": event_type,
             "updated_at": now_iso,
         }
-        await repo.set_tier(app_user_id, "free")
-        await repo.set_discount_offer_shown(app_user_id)
+        await repo.set_tier(
+            app_user_id,
+            "free",
+            updated_preferences={"subscription": subscription_pref},
+        )
 
     elif event_type == "BILLING_ISSUE":
         logger.warning("Billing issue reported for user %s", app_user_id)

@@ -221,6 +221,45 @@ def test_delete_user_me_already_deleted(client, mock_user_session):
     assert res2.status_code == 401
 
 
+# ── POST /user/me/simulate-trial-expiry ────────────────────────────────────────
+
+def test_simulate_trial_expiry_endpoint(client, mock_user_session):
+    """POST /user/me/simulate-trial-expiry fast-forwards trial and applies downgrade idempotently."""
+    res1 = client.post("/api/v1/user/me/simulate-trial-expiry", headers=mock_user_session["headers"])
+    assert res1.status_code == 200
+    data1 = res1.json()
+    assert data1["success"] is True
+    assert data1["tier"] == "free"
+    assert data1["is_in_trial"] is False
+    assert data1["discount_offer_shown_at"] is not None
+
+    # Verify idempotency
+    res2 = client.post("/api/v1/user/me/simulate-trial-expiry", headers=mock_user_session["headers"])
+    assert res2.status_code == 200
+    data2 = res2.json()
+    assert data2["success"] is True
+    assert data2["tier"] == "free"
+    assert data2["is_in_trial"] is False
+
+
+def test_simulate_trial_expiry_unauthorized(client, mock_device):
+    """POST /user/me/simulate-trial-expiry without user token returns HTTP 401 or 422."""
+    response = client.post("/api/v1/user/me/simulate-trial-expiry", headers=mock_device["headers"])
+    assert response.status_code in (401, 422)
+
+
+def test_simulate_trial_expiry_forbidden_in_production(client, mock_user_session, monkeypatch):
+    """POST /user/me/simulate-trial-expiry in production returns HTTP 403."""
+    from src.config import get_settings
+    settings = get_settings()
+    monkeypatch.setattr(settings, "environment", "production")
+
+    response = client.post("/api/v1/user/me/simulate-trial-expiry", headers=mock_user_session["headers"])
+    assert response.status_code == 403
+    assert "Simulation endpoints are only available in development environment" in response.json()["detail"]
+
+
+
 if __name__ == "__main__":
     import pytest
     import sys

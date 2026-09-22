@@ -423,6 +423,7 @@ class UserRepository:
             return False
         clean_device = device_id.strip()
         try:
+            # 1. Check users table preferences for trial_device_id
             res = await (
                 self.db.table(self.TABLE)
                 .select("id")
@@ -431,10 +432,54 @@ class UserRepository:
                 .limit(1)
                 .execute()
             )
-            return bool(res.data)
+            if res and res.data:
+                return True
+
+            # 2. Check devices table if device was registered and linked to an account
+            res_dev = await (
+                self.db.table("devices")
+                .select("id, user_id")
+                .eq("name", clean_device)
+                .not_.is_("user_id", "null")
+                .is_("deleted_at", "null")
+                .limit(1)
+                .execute()
+            )
+            if res_dev and res_dev.data:
+                return True
+
+            return False
         except Exception as e:
             logger.warning("Error checking device trial consumption for device=%s: %s", clean_device, e)
             return False
+
+    async def simulate_trial_expiry(self, user_id: str) -> dict | None:
+        """Simulate 14-day trial expiration by setting trial_start_at to 15 days ago and applying downgrade."""
+        user = await self.get_by_id(user_id)
+        if not user:
+            return None
+        prefs = dict(user.get("preferences") or {})
+        past_15_days = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()
+        prefs["trial_start_at"] = past_15_days
+        prefs["is_in_trial"] = True
+
+        # Update user with past trial start time
+        now_iso = datetime.now(timezone.utc).isoformat()
+        await (
+            self.db.table(self.TABLE)
+            .update({
+                "preferences": prefs,
+                "tier": "premium",
+                "updated_at": now_iso,
+            })
+            .eq("id", user_id)
+            .execute()
+        )
+
+        user["preferences"] = prefs
+        user["tier"] = "premium"
+        updated_user = await self.check_and_apply_trial_expiration(user)
+        return updated_user
 
     async def set_trial_start(self, user_id: str, device_id: str | None = None) -> dict | None:
         """Grant 14-day free reverse trial to user and record trial timestamp in preferences."""
@@ -474,8 +519,8 @@ class UserRepository:
             logger.error("Failed to set trial start for user_id=%s: %s", user_id, e, exc_info=True)
             raise
 
-    async def set_tier(self, user_id: str, tier: str) -> dict | None:
-        """Update the user's subscription tier ('free', 'premium', 'dev')."""
+    async def set_tier(self, user_id: str, tier: str, updated_preferences: dict | None = None) -> dict | None:
+        """Update the user's subscription tier ('free', 'premium', 'dev') and preferences."""
         start_time = time.perf_counter()
         clean_tier = tier.strip().lower()
         now = datetime.now(timezone.utc).isoformat()
@@ -485,7 +530,14 @@ class UserRepository:
                 return None
 
             prefs = user.get("preferences") or {}
-            if clean_tier != "premium":
+            if updated_preferences:
+                prefs.update(updated_preferences)
+
+            if clean_tier == "premium":
+                prefs["is_in_trial"] = False
+                prefs["discount_offer_claimed"] = True
+                prefs["discount_offer_shown_at"] = None
+            else:
                 prefs["is_in_trial"] = False
 
             res = await (
@@ -511,7 +563,9 @@ class UserRepository:
             raise
 
     async def set_discount_offer_shown(self, user_id: str) -> dict | None:
-        """Record timestamp when the 7-day downgrade discount offer was first triggered."""
+        """Record timestamp when the 7-day downgrade discount offer was first triggered.
+        Guarded: Only applies to users who actually completed the 14-day trial.
+        """
         now = datetime.now(timezone.utc)
         try:
             user = await self.get_by_id(user_id)
@@ -519,6 +573,11 @@ class UserRepository:
                 return None
 
             prefs = user.get("preferences") or {}
+            # Guard: User must have had a trial, must not be trial ineligible, and must not have already claimed discount
+            if not prefs.get("trial_start_at") or prefs.get("trial_ineligible", False) or prefs.get("discount_offer_claimed", False):
+                logger.info("Skipping discount offer for ineligible user_id=%s", user_id)
+                return user
+
             if not prefs.get("discount_offer_shown_at"):
                 prefs["discount_offer_shown_at"] = now.isoformat()
                 res = await (

@@ -75,6 +75,7 @@ Document Validation & Confidence Scoring Rules:
 8. line_items: Extract all purchased products, items, and services. Also extract:
    - Surcharges (e.g. Service Charge, non-inclusive GST/VAT/Tax, Delivery Fee, Tips, Surcharge) as separate line items with positive unit_price and total_price values.
    - Discounts (e.g. Vouchers, Coupons, Member Discounts, Promo Codes, Special Reductions, Trade-ins, Deductions) as separate line items with NEGATIVE unit_price and total_price values (e.g. -2.50).
+   - Do NOT extract subtotals, total amount, and grand total amount.
 9. Set missing optional fields (subtotal, tax_amount, notes, line_items, category) to null.
 10. Output ONLY valid JSON matching the schema. No prose, no markdown wrappers.
 """.strip()
@@ -227,8 +228,16 @@ class ExtractionService:
 
         system_content = f"{SYSTEM_PROMPT}\n\n{OPENROUTER_JSON_SCHEMA_HINT}"
 
+        is_free_tier = getattr(context, "tier", "free") == "free"
+        if is_free_tier:
+            model_name = self.settings.openrouter_vision_model_free
+            if not model_name:
+                raise ValueError("OPENROUTER_VISION_MODEL_FREE must be configured in .env for Free tier OpenRouter vision extraction")
+        else:
+            model_name = self.settings.openrouter_vision_model
+
         payload = {
-            "model": self.settings.openrouter_vision_model,
+            "model": model_name,
             "response_format": {"type": "json_object"},
             "messages": [
                 {"role": "system", "content": system_content},
@@ -253,9 +262,10 @@ class ExtractionService:
         result = resp.json()
         text = result["choices"][0]["message"]["content"]
         logger.info(
-            "OpenRouter vision response received. Output text len=%d, model=%s",
+            "OpenRouter vision response received. Output text len=%d, model=%s (tier=%s)",
             len(text),
-            self.settings.openrouter_vision_model,
+            model_name,
+            getattr(context, "tier", "free"),
         )
         return text
 
@@ -277,11 +287,19 @@ class ExtractionService:
         """
         provider = self.settings.effective_ai_provider
         image_size = len(context.image_bytes) if context.image_bytes else 0
-        model_name = (
-            self.settings.gemini_vision_model
-            if provider == "gemini"
-            else self.settings.openrouter_vision_model
-        )
+        is_free_tier = getattr(context, "tier", "free") == "free"
+        if provider == "gemini":
+            model_name = (
+                self.settings.gemini_vision_model_free
+                if is_free_tier and self.settings.gemini_vision_model_free
+                else self.settings.gemini_vision_model
+            )
+        else:
+            model_name = (
+                self.settings.openrouter_vision_model_free
+                if is_free_tier and self.settings.openrouter_vision_model_free
+                else self.settings.openrouter_vision_model
+            )
         logger.debug(
             "extract_from_image called: provider=%s, model=%s, mime_type=%s, bytes_size=%d",
             provider,

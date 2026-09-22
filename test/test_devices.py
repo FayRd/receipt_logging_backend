@@ -313,6 +313,56 @@ def test_delete_device_me_already_deleted(client, mock_device):
     assert res2.status_code == 401
 
 
+def test_get_device_trial_status_unclaimed(client):
+    """GET /devices/{device_name}/trial-status returns trial_used=False for an unregistered device."""
+    device_name = f"DEV-UNCLAIMED-{uuid.uuid4().hex[:6]}"
+    
+    res1 = client.get(f"/api/v1/devices/{device_name}/trial-status")
+    assert res1.status_code == 200
+    data1 = res1.json()
+    assert data1["device_name"] == device_name
+    assert data1["trial_used"] is False
+    assert data1["trial_eligible"] is True
+
+    # Verify idempotency
+    res2 = client.get(f"/api/v1/devices/{device_name}/trial-status")
+    assert res2.status_code == 200
+    assert res2.json() == data1
+
+
+def test_get_device_trial_status_claimed(client):
+    """GET /devices/{device_name}/trial-status returns trial_used=True for a device linked to a trial."""
+    device_name = f"DEV-CLAIMED-{uuid.uuid4().hex[:6]}"
+    username = f"ut_{uuid.uuid4().hex[:6]}"
+    password = "Password123!"
+
+    res_create = client.post("/api/v1/user/create", json={
+        "username": username,
+        "email": f"{username}@test.example.com",
+        "password": password,
+        "preferences": {
+            "trial_device_id": device_name,
+        }
+    })
+    assert res_create.status_code == 201
+
+    try:
+        res1 = client.get(f"/api/v1/devices/{device_name}/trial-status")
+        assert res1.status_code == 200
+        data1 = res1.json()
+        assert data1["device_name"] == device_name
+        assert data1["trial_used"] is True
+        assert data1["trial_eligible"] is False
+
+        # Verify idempotency
+        res2 = client.get(f"/api/v1/devices/{device_name}/trial-status")
+        assert res2.status_code == 200
+        assert res2.json() == data1
+    finally:
+        user_headers = {"X-User-Name": username, "X-User-Token": password}
+        client.delete("/api/v1/user/me", headers=user_headers)
+
+
 if __name__ == "__main__":
     import pytest
     import sys

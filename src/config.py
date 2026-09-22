@@ -58,7 +58,9 @@ class Settings(BaseSettings):
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     openrouter_vision_model: str = "google/gemini-2.5-flash"
+    openrouter_vision_model_free: str = ""
     openrouter_chat_model: str = "google/gemini-2.5-flash"
+    openrouter_chat_model_free: str = ""
 
     # Discord Feedback Webhook
     discord_feedback_webhook_url: str = ""

@@ -687,7 +687,7 @@ async def stream_parse_many_batch(
                     completed_count,
                     len(job_ids) - completed_count,
                 )
-                yield f"event: batch_complete\ndata: {json.dumps(batch_data)}\n\n"
+                yield f"event: batch_complete\ndata: {json.dumps(batch_data.model_dump())}\n\n"
                 return
 
             # Keep-alive comment to prevent proxy/nginx from closing idle connection

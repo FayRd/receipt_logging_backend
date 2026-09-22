@@ -60,7 +60,6 @@ class Settings(BaseSettings):
     openrouter_vision_model: str = "google/gemini-2.5-flash"
     openrouter_vision_model_free: str = ""
     openrouter_chat_model: str = "google/gemini-2.5-flash"
-    openrouter_chat_model_free: str = ""
 
     # Discord Feedback Webhook
     discord_feedback_webhook_url: str = ""

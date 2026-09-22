@@ -220,8 +220,16 @@ class ExtractionService:
 
         Images are encoded as base64 data URLs per the OpenAI vision message format.
         ``response_format={"type": "json_object"}`` is set for broad model compatibility.
+        Free tier uses ``openrouter_vision_model_free`` when set; Premium/Dev use ``openrouter_vision_model``.
         Returns the raw JSON string for downstream validation.
         """
+        # Resolve model: use the free-tier override when available and the user is on the free tier
+        model_name = self.settings.openrouter_vision_model
+        if getattr(context, "tier", "free") == "free" and self.settings.openrouter_vision_model_free:
+            model_name = self.settings.openrouter_vision_model_free
+
+        logger.info("Executing OpenRouter vision extraction using model: %s (tier=%s)", model_name, getattr(context, "tier", "free"))
+
         # Encode image bytes to base64 data URL (OpenAI vision format)
         encoded = base64.b64encode(context.image_bytes).decode("utf-8")
         data_url = f"data:{context.content_type};base64,{encoded}"
@@ -237,6 +245,7 @@ class ExtractionService:
             model_name = self.settings.openrouter_vision_model
 
         payload = {
+            "model": model_name,
             "model": model_name,
             "response_format": {"type": "json_object"},
             "messages": [
@@ -268,6 +277,7 @@ class ExtractionService:
             getattr(context, "tier", "free"),
         )
         return text
+
 
     async def extract_from_image(self, context: ScanContext) -> Receipt:
         """Send a receipt image to the configured AI provider and return a structured Receipt.

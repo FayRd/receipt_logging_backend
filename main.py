@@ -60,17 +60,11 @@ async def lifespan(app: FastAPI):
         await redis_client.aclose()
 
 
-settings = get_settings()
-is_production = settings.environment.lower() == "production"
-
 app = FastAPI(
     title="Receipt Scanner API",
     description="AI-powered receipt scanning and tracking backend",
     version="1.0.0",
     lifespan=lifespan,
-    docs_url=None if is_production else "/docs",
-    redoc_url=None if is_production else "/redoc",
-    openapi_url=None if is_production else "/openapi.json",
 )
 
 # ── REQUEST TRACE MIDDLEWARE ──────────────────────────────────────────────────
@@ -183,7 +177,4 @@ app.include_router(subscriptions.router, prefix="/api/v1")
 
 @app.get("/")
 async def root():
-    response = {"message": "Receipt Logging API"}
-    if not is_production:
-        response["docs"] = "/docs"
-    return response
+    return {"message": "Receipt Logging API", "docs": "/docs"}

@@ -10,6 +10,11 @@ from src.config import get_settings
 logger = get_logger("Infrastructure.crypto")
 
 
+class DecryptionError(Exception):
+    """Raised when decryption fails due to key mismatch, wrong AAD, or data corruption."""
+    pass
+
+
 class CryptoEngine:
     """Cryptographic Engine for backend authenticated data encryption at rest (AES-256-GCM).
 
@@ -20,8 +25,10 @@ class CryptoEngine:
       with the `{"_enc": "v1", "iv": "...", "tag": "...", "data": "..."}` JSON envelope format.
     - `encrypt_bytes` / `decrypt_bytes` for raw byte arrays.
     - Transparent backward-compatible fallback for unencrypted legacy data.
+    - Safe defensive fallback decryption methods (`safe_decrypt_*`).
     """
 
+    SUPPORTED_VERSIONS: set[str] = {"v1", "v2"}
     ENVELOPE_VERSION = "v1"
     TEXT_PREFIX = "enc:v1:"
     BYTES_PREFIX = b"ENC:V1:"
@@ -99,19 +106,22 @@ class CryptoEngine:
     def decrypt_text(self, envelope: str, aad: bytes | None = None) -> str:
         """Decrypt string envelope.
 
-        If `envelope` does not start with `enc:v1:`, returns it as-is for backward compatibility.
-        Raises `InvalidTag` if encrypted data has been tampered with.
+        Supports `enc:v1:` and `enc:v2:` envelopes.
+        If `envelope` does not start with a recognized envelope prefix, returns it as-is for backward compatibility.
+        Raises `InvalidTag` if encrypted data has been tampered with or key is mismatched.
         """
         if not isinstance(envelope, str):
             return envelope
 
-        if not envelope.startswith(self.TEXT_PREFIX):
+        # Must start with "enc:<version>:" where version is in SUPPORTED_VERSIONS
+        if not envelope.startswith("enc:"):
             # Backward-compatible fallback for unencrypted legacy string
             return envelope
 
         parts = envelope.split(":")
-        if len(parts) != 5 or parts[0] != "enc" or parts[1] != "v1":
-            raise ValueError(f"Invalid encrypted text envelope format: {envelope}")
+        if len(parts) != 5 or parts[0] != "enc" or parts[1] not in self.SUPPORTED_VERSIONS:
+            # If not a recognized encrypted format, return as-is
+            return envelope
 
         try:
             iv = base64.b64decode(parts[2])
@@ -155,15 +165,16 @@ class CryptoEngine:
     def decrypt_json(self, payload: dict | str | None, aad: bytes | None = None) -> dict[str, Any]:
         """Decrypt JSON envelope or dict payload.
 
+        Supports `v1` and `v2` envelopes in both dictionary and serialized JSON form.
         If payload is unencrypted dict or legacy JSON, returns it as-is for backward compatibility.
-        Raises `InvalidTag` if encrypted data has been tampered with.
+        Raises `InvalidTag` if encrypted data has been tampered with or key is mismatched.
         """
         if payload is None:
             return {}
 
         if isinstance(payload, str):
             # Check if text envelope
-            if payload.startswith(self.TEXT_PREFIX):
+            if payload.startswith("enc:") and any(payload.startswith(f"enc:{v}:") for v in self.SUPPORTED_VERSIONS):
                 decrypted_str = self.decrypt_text(payload, aad)
                 return json.loads(decrypted_str)
 
@@ -177,7 +188,7 @@ class CryptoEngine:
                 return payload
 
         if isinstance(payload, dict):
-            if payload.get("_enc") == self.ENVELOPE_VERSION:
+            if payload.get("_enc") in self.SUPPORTED_VERSIONS:
                 try:
                     iv = base64.b64decode(payload["iv"])
                     tag = base64.b64decode(payload["tag"])
@@ -212,16 +223,24 @@ class CryptoEngine:
     def decrypt_bytes(self, data: bytes, aad: bytes | None = None) -> bytes:
         """Decrypt raw bytes with backward-compatible legacy binary passthrough.
 
-        If data does not start with b"ENC:V1:", returns data as-is (e.g. legacy JPEG).
+        Supports `ENC:V1:` and `ENC:V2:` byte prefixes.
+        If data does not start with a recognized prefix, returns data as-is (e.g. legacy JPEG).
         """
         if not data:
             return data
 
-        if not data.startswith(self.BYTES_PREFIX):
+        matched_prefix: bytes | None = None
+        for v in self.SUPPORTED_VERSIONS:
+            p = f"ENC:{v.upper()}:".encode("ascii")
+            if data.startswith(p):
+                matched_prefix = p
+                break
+
+        if not matched_prefix:
             # Backward-compatible fallback for unencrypted legacy image binary
             return data
 
-        prefix_len = len(self.BYTES_PREFIX)
+        prefix_len = len(matched_prefix)
         if len(data) < prefix_len + 28:
             raise ValueError("Encrypted byte payload too short (minimum 28 bytes for IV + Tag).")
 
@@ -230,6 +249,122 @@ class CryptoEngine:
         ciphertext = data[prefix_len + 28 :]
         ct_and_tag = ciphertext + tag
         return self._aesgcm.decrypt(iv, ct_and_tag, aad)
+
+    # ── DEFENSIVE SAFE DECRYPTION HELPERS ──────────────────────────────────────
+
+    def safe_decrypt_text(
+        self,
+        envelope: str,
+        aad: bytes | None = None,
+        context: str = "",
+        fallback: str | None = None,
+    ) -> str:
+        """Safely decrypt text envelope with defensive handling of InvalidTag.
+
+        If decryption fails (InvalidTag / corrupted / mismatched key):
+        - If fallback is provided (not None), logs warning and returns fallback.
+        - If fallback is None, logs CRITICAL error and raises DecryptionError.
+        """
+        try:
+            return self.decrypt_text(envelope, aad=aad)
+        except InvalidTag as exc:
+            if fallback is not None:
+                logger.warning(
+                    "DECRYPTION FALLBACK [InvalidTag] context=%s. Returning fallback placeholder.",
+                    context,
+                )
+                return fallback
+            logger.critical(
+                "DECRYPTION FAILURE [InvalidTag] context=%s — possible key mismatch or corruption. "
+                "Check DATA_ENCRYPTION_KEY. This record cannot be decrypted.",
+                context,
+            )
+            raise DecryptionError(f"Decryption failed for {context}") from exc
+        except Exception as exc:
+            if fallback is not None:
+                logger.warning(
+                    "DECRYPTION FALLBACK [Exception] context=%s: %s. Returning fallback placeholder.",
+                    context,
+                    exc,
+                )
+                return fallback
+            raise
+
+    def safe_decrypt_json(
+        self,
+        payload: dict | str | None,
+        aad: bytes | None = None,
+        context: str = "",
+        fallback: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Safely decrypt JSON envelope with defensive handling of InvalidTag.
+
+        If decryption fails (InvalidTag / corrupted / mismatched key):
+        - If fallback is provided (not None), logs warning and returns fallback.
+        - If fallback is None, logs CRITICAL error and raises DecryptionError.
+        """
+        try:
+            return self.decrypt_json(payload, aad=aad)
+        except InvalidTag as exc:
+            if fallback is not None:
+                logger.warning(
+                    "DECRYPTION FALLBACK [InvalidTag] context=%s. Returning fallback dictionary.",
+                    context,
+                )
+                return fallback
+            logger.critical(
+                "DECRYPTION FAILURE [InvalidTag] context=%s — possible key mismatch or corruption. "
+                "Check DATA_ENCRYPTION_KEY.",
+                context,
+            )
+            raise DecryptionError(f"Decryption failed for {context}") from exc
+        except Exception as exc:
+            if fallback is not None:
+                logger.warning(
+                    "DECRYPTION FALLBACK [Exception] context=%s: %s. Returning fallback dictionary.",
+                    context,
+                    exc,
+                )
+                return fallback
+            raise
+
+    def safe_decrypt_bytes(
+        self,
+        data: bytes,
+        aad: bytes | None = None,
+        context: str = "",
+        fallback: bytes | None = None,
+    ) -> bytes:
+        """Safely decrypt raw bytes with defensive handling of InvalidTag.
+
+        If decryption fails (InvalidTag / corrupted / mismatched key):
+        - If fallback is provided (not None), logs warning and returns fallback.
+        - If fallback is None, logs CRITICAL error and raises DecryptionError.
+        """
+        try:
+            return self.decrypt_bytes(data, aad=aad)
+        except InvalidTag as exc:
+            if fallback is not None:
+                logger.warning(
+                    "DECRYPTION FALLBACK [InvalidTag] context=%s. Returning fallback bytes.",
+                    context,
+                )
+                return fallback
+            logger.critical(
+                "DECRYPTION FAILURE [InvalidTag] context=%s — possible key mismatch or corruption. "
+                "Check DATA_ENCRYPTION_KEY.",
+                context,
+            )
+            raise DecryptionError(f"Decryption failed for {context}") from exc
+        except Exception as exc:
+            if fallback is not None:
+                logger.warning(
+                    "DECRYPTION FALLBACK [Exception] context=%s: %s. Returning fallback bytes.",
+                    context,
+                    exc,
+                )
+                return fallback
+            raise
 
 
 _crypto_engine: CryptoEngine | None = None

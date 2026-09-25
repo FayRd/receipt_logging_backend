@@ -4,7 +4,8 @@ import json
 import os
 import pytest
 from cryptography.exceptions import InvalidTag
-from src.Infrastructure.crypto import CryptoEngine, get_crypto_engine
+from src.Infrastructure.crypto import CryptoEngine, get_crypto_engine, DecryptionError
+from src.config import Settings, assert_production_keys
 from src.Models.schemas import Receipt
 from src.Models.Receipts.receipt_repository import ReceiptRepository
 from src.Models.Conversations.conversation_repository import ConversationRepository
@@ -278,6 +279,151 @@ def test_conversation_repository_encryption_flow(client, mock_user_session):
     matched = [c for c in conversations if c["id"] == conv_id]
     assert len(matched) == 1
     assert matched[0]["title"] == secret_title
+
+
+# ── UNIT TESTS: DEFENSIVE SAFE DECRYPTION & KEY ENFORCEMENT ─────────────────
+
+def test_safe_decrypt_text_handling():
+    engine = get_crypto_engine()
+    wrong_key = base64.b64encode(b"wrong-key-32-bytes-long-padding!").decode("ascii")
+    wrong_engine = CryptoEngine(key=wrong_key)
+
+    ciphertext = engine.encrypt_text("Confidential message")
+
+    # 1. Normal decryption succeeds
+    assert engine.safe_decrypt_text(ciphertext) == "Confidential message"
+
+    # 2. Decryption with wrong key without fallback raises DecryptionError
+    with pytest.raises(DecryptionError):
+        wrong_engine.safe_decrypt_text(ciphertext, context="test.col")
+
+    # 3. Decryption with wrong key with fallback returns fallback placeholder
+    fallback_val = "[Encrypted Content]"
+    assert wrong_engine.safe_decrypt_text(ciphertext, context="test.col", fallback=fallback_val) == fallback_val
+
+
+def test_safe_decrypt_json_handling():
+    engine = get_crypto_engine()
+    wrong_key = base64.b64encode(b"wrong-key-32-bytes-long-padding!").decode("ascii")
+    wrong_engine = CryptoEngine(key=wrong_key)
+
+    data = {"merchant": "Target", "amount": 42.50}
+    enc_json = engine.encrypt_json(data)
+
+    # 1. Normal decryption succeeds
+    assert engine.safe_decrypt_json(enc_json) == data
+
+    # 2. Decryption with wrong key without fallback raises DecryptionError
+    with pytest.raises(DecryptionError):
+        wrong_engine.safe_decrypt_json(enc_json, context="receipts.receipt")
+
+    # 3. Decryption with wrong key with fallback returns fallback dictionary
+    fallback_dict = {"merchant": "[Encrypted]", "amount": 0.0}
+    result = wrong_engine.safe_decrypt_json(enc_json, context="receipts.receipt", fallback=fallback_dict)
+    assert result == fallback_dict
+
+
+def test_safe_decrypt_bytes_handling():
+    engine = get_crypto_engine()
+    wrong_key = base64.b64encode(b"wrong-key-32-bytes-long-padding!").decode("ascii")
+    wrong_engine = CryptoEngine(key=wrong_key)
+
+    raw_data = b"image-jpeg-binary-stream-12345"
+    enc_bytes = engine.encrypt_bytes(raw_data)
+
+    # 1. Normal decryption succeeds
+    assert engine.safe_decrypt_bytes(enc_bytes) == raw_data
+
+    # 2. Decryption with wrong key without fallback raises DecryptionError
+    with pytest.raises(DecryptionError):
+        wrong_engine.safe_decrypt_bytes(enc_bytes, context="storage:image")
+
+    # 3. Decryption with wrong key with fallback returns fallback bytes
+    fallback_bytes = b"placeholder-image"
+    assert wrong_engine.safe_decrypt_bytes(enc_bytes, context="storage:image", fallback=fallback_bytes) == fallback_bytes
+
+
+def test_multi_version_envelope_support():
+    engine = get_crypto_engine()
+
+    # V1 envelope
+    v1_text = engine.encrypt_text("Message v1")
+    assert v1_text.startswith("enc:v1:")
+    assert engine.decrypt_text(v1_text) == "Message v1"
+
+    # Simulate V2 envelope (using same engine internals with v2 prefix)
+    iv = os.urandom(12)
+    ct_and_tag = engine._aesgcm.encrypt(iv, b"Message v2", None)
+    iv_b64 = base64.b64encode(iv).decode("ascii")
+    tag_b64 = base64.b64encode(ct_and_tag[-16:]).decode("ascii")
+    ct_b64 = base64.b64encode(ct_and_tag[:-16]).decode("ascii")
+    v2_text = f"enc:v2:{iv_b64}:{tag_b64}:{ct_b64}"
+
+    # Engine decrypts v2 transparently
+    assert engine.decrypt_text(v2_text) == "Message v2"
+
+    # Simulate V2 JSON envelope
+    json_payload = {"msg": "v2", "count": 42}
+    json_bytes = json.dumps(json_payload).encode("utf-8")
+    iv_json = os.urandom(12)
+    ct_and_tag_json = engine._aesgcm.encrypt(iv_json, json_bytes, None)
+    v2_json = {
+        "_enc": "v2",
+        "iv": base64.b64encode(iv_json).decode("ascii"),
+        "tag": base64.b64encode(ct_and_tag_json[-16:]).decode("ascii"),
+        "data": base64.b64encode(ct_and_tag_json[:-16]).decode("ascii"),
+    }
+    assert engine.decrypt_json(v2_json) == json_payload
+
+    # Simulate V2 bytes envelope
+    v2_bytes = b"ENC:V2:" + iv + ct_and_tag[-16:] + ct_and_tag[:-16]
+    assert engine.decrypt_bytes(v2_bytes) == b"Message v2"
+
+
+def test_assert_production_keys_guard():
+    # 1. Development environment: allows placeholder dev keys
+    dev_settings = Settings(
+        environment="development",
+        data_encryption_key="dGVzdC1zZWNyZXQtZW5jcnlwdGlvbi1rZXktMzJieXRlcw==",
+        jwt_secret_key="",
+    )
+    assert_production_keys(dev_settings)  # Should not raise
+
+    # 2. Production environment: rejects placeholder dev key
+    prod_dev_key_settings = Settings(
+        environment="production",
+        data_encryption_key="dGVzdC1zZWNyZXQtZW5jcnlwdGlvbi1rZXktMzJieXRlcw==",
+        jwt_secret_key="some-strong-jwt-secret-string-here",
+    )
+    with pytest.raises(RuntimeError, match="Development placeholder DATA_ENCRYPTION_KEY detected"):
+        assert_production_keys(prod_dev_key_settings)
+
+    # 3. Staging environment: rejects placeholder dev key
+    staging_dev_key_settings = Settings(
+        environment="staging",
+        data_encryption_key="dGVzdC1zZWNyZXQtZW5jcnlwdGlvbi1rZXktMzJieXRlcw==",
+        jwt_secret_key="some-strong-jwt-secret-string-here",
+    )
+    with pytest.raises(RuntimeError, match="Development placeholder DATA_ENCRYPTION_KEY detected"):
+        assert_production_keys(staging_dev_key_settings)
+
+    # 4. Production environment: rejects empty or weak JWT key
+    strong_data_key = base64.b64encode(os.urandom(32)).decode("ascii")
+    prod_weak_jwt_settings = Settings(
+        environment="production",
+        data_encryption_key=strong_data_key,
+        jwt_secret_key="your-secret-key",
+    )
+    with pytest.raises(RuntimeError, match="Weak or placeholder JWT_SECRET_KEY detected"):
+        assert_production_keys(prod_weak_jwt_settings)
+
+    # 5. Production environment with strong keys: passes
+    prod_valid_settings = Settings(
+        environment="production",
+        data_encryption_key=strong_data_key,
+        jwt_secret_key="a-random-secure-high-entropy-jwt-secret-key-123456",
+    )
+    assert_production_keys(prod_valid_settings)  # Should not raise
 
 
 if __name__ == "__main__":

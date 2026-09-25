@@ -284,7 +284,7 @@ class ImageStorageService:
             )
             raw_data = await self.db.storage.from_(self.bucket).download(storage_path)
             if raw_data:
-                decrypted = self.crypto.decrypt_bytes(raw_data)
+                decrypted = self.crypto.safe_decrypt_bytes(raw_data, context=f"storage:{storage_path}")
                 return decrypted
             return None
         except Exception as e:

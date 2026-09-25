@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 import redis.asyncio as aioredis
 from google import genai
-from src.config import get_settings
+from src.config import get_settings, assert_production_keys
 from src.Infrastructure.logger import setup_logging, get_logger, set_request_id
 from src.Infrastructure.database import get_supabase_client, close_supabase_client
 from src.API.v1 import health, scan, receipts, user, devices, chat, help, subscriptions
@@ -29,13 +29,8 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     logger.info(f"Starting Receipt API in {settings.environment} mode (Logging: {settings.enable_file_logging})")
 
-    # Production secrets verification guardrail
-    if settings.environment == "production":
-        default_dev_key = "dGVzdC1zZWNyZXQtZW5jcnlwdGlvbi1rZXktMzJieXRlcw=="
-        if settings.data_encryption_key == default_dev_key:
-            raise RuntimeError("CRITICAL: Production startup aborted: DATA_ENCRYPTION_KEY is using default placeholder key.")
-        if not settings.jwt_secret_key:
-            raise RuntimeError("CRITICAL: Production startup aborted: JWT_SECRET_KEY is empty in production environment.")
+    # Production & Staging secrets verification guardrail (TODO-04)
+    assert_production_keys(settings)
 
     # Initialize Async Redis client
     redis_client = aioredis.from_url(settings.redis_connection_string, decode_responses=True)

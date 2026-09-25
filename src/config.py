@@ -1,4 +1,5 @@
 from functools import lru_cache
+import hashlib
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -131,3 +132,53 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+# SHA-256 fingerprints of known placeholder dev keys that must never run in staging/production
+_DEV_KEY_FINGERPRINTS: set[str] = {
+    hashlib.sha256(b"dGVzdC1zZWNyZXQtZW5jcnlwdGlvbi1rZXktMzJieXRlcw==").hexdigest(),
+    hashlib.sha256(b"test-secret-encryption-key-32bytes").hexdigest(),
+}
+
+# Weak or placeholder JWT secrets
+_WEAK_JWT_FINGERPRINTS: set[str] = {
+    hashlib.sha256(b"your-secret-key").hexdigest(),
+    hashlib.sha256(b"secret").hexdigest(),
+    hashlib.sha256(b"changeme").hexdigest(),
+    hashlib.sha256(b"jwt-secret-key").hexdigest(),
+}
+
+
+def assert_production_keys(settings: Settings) -> None:
+    """Enforce strong, non-placeholder keys in production and staging environments.
+
+    Fails fast with RuntimeError if development placeholder keys are detected.
+    """
+    env = (settings.environment or "development").lower().strip()
+    if env in ("production", "staging"):
+        enc_key = (settings.data_encryption_key or "").strip()
+        if not enc_key:
+            raise RuntimeError(
+                f"FATAL: DATA_ENCRYPTION_KEY is empty in '{env}' environment. "
+                "The application will not start."
+            )
+        key_fp = hashlib.sha256(enc_key.encode()).hexdigest()
+        if key_fp in _DEV_KEY_FINGERPRINTS:
+            raise RuntimeError(
+                f"FATAL: Development placeholder DATA_ENCRYPTION_KEY detected in '{env}' environment. "
+                "Set a strong, randomly-generated 32-byte base64 key via environment variables. "
+                "The application will not start."
+            )
+        jwt_key = (settings.jwt_secret_key or "").strip()
+        if not jwt_key:
+            raise RuntimeError(
+                f"FATAL: JWT_SECRET_KEY is empty in '{env}' environment. "
+                "The application will not start."
+            )
+        jwt_fp = hashlib.sha256(jwt_key.encode()).hexdigest()
+        if jwt_fp in _WEAK_JWT_FINGERPRINTS:
+            raise RuntimeError(
+                f"FATAL: Weak or placeholder JWT_SECRET_KEY detected in '{env}' environment. "
+                "The application will not start."
+            )
+

@@ -5,3 +5,10 @@ __pycache__
 artifacts/
 otp_dev.log
 app.log
+
+# Migration & Key Rotation Scripts (contain sensitive credential prompts & procedures)
+scripts/
+
+# Rotation / Migration Audit & Error Logs
+failed_rows_*.log
+key_rotation_log.md

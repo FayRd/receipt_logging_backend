@@ -72,7 +72,9 @@ class ConversationRepository:
             res = await q.maybe_single().execute()
             result = res.data if res else None
             if result and "title" in result and result["title"] is not None:
-                result["title"] = self.crypto.decrypt_text(result["title"])
+                result["title"] = self.crypto.safe_decrypt_text(
+                    result["title"], context="conversations.title", fallback="[Encrypted Title]"
+                )
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "SELECT conversation get_conversation finished: found=%s in %.2fms",
@@ -110,7 +112,9 @@ class ConversationRepository:
             res = await self.db.table(self.CONVERSATIONS_TABLE).insert(row).execute()
             created_row = res.data[0]
             if "title" in created_row and created_row["title"] is not None:
-                created_row["title"] = self.crypto.decrypt_text(created_row["title"])
+                created_row["title"] = self.crypto.safe_decrypt_text(
+                    created_row["title"], context="conversations.title", fallback="[Encrypted Title]"
+                )
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "INSERT conversation create_conversation succeeded: id=%s in %.2fms",
@@ -150,7 +154,9 @@ class ConversationRepository:
             rows = res.data if res else []
             for row in rows:
                 if "title" in row and row["title"] is not None:
-                    row["title"] = self.crypto.decrypt_text(row["title"])
+                    row["title"] = self.crypto.safe_decrypt_text(
+                        row["title"], context="conversations.title", fallback="[Encrypted Title]"
+                    )
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "SELECT conversations list_conversations succeeded: returned %d rows in %.2fms",
@@ -192,7 +198,9 @@ class ConversationRepository:
             res = await q.execute()
             result = res.data[0] if res and res.data else None
             if result and "title" in result and result["title"] is not None:
-                result["title"] = self.crypto.decrypt_text(result["title"])
+                result["title"] = self.crypto.safe_decrypt_text(
+                    result["title"], context="conversations.title", fallback="[Encrypted Title]"
+                )
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "UPDATE conversation update_title finished: conversation_id=%s, found=%s in %.2fms",
@@ -245,7 +253,9 @@ class ConversationRepository:
             rows = res.data if res else []
             for row in rows:
                 if "content" in row and row["content"] is not None:
-                    row["content"] = self.crypto.decrypt_text(row["content"])
+                    row["content"] = self.crypto.safe_decrypt_text(
+                        row["content"], context="chat_messages.content", fallback="[Encrypted Message]"
+                    )
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "SELECT chat_messages get_messages succeeded: returned %d/%d rows in %.2fms",
@@ -283,7 +293,9 @@ class ConversationRepository:
             res = await self.db.table(self.MESSAGES_TABLE).insert(row).execute()
             created_row = res.data[0]
             if "content" in created_row and created_row["content"] is not None:
-                created_row["content"] = self.crypto.decrypt_text(created_row["content"])
+                created_row["content"] = self.crypto.safe_decrypt_text(
+                    created_row["content"], context="chat_messages.content", fallback="[Encrypted Message]"
+                )
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "INSERT chat_messages add_message succeeded: id=%s in %.2fms",

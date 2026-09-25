@@ -1,4 +1,5 @@
 import time
+from typing import Any
 from datetime import datetime, timezone
 from supabase import AsyncClient
 from src.Infrastructure.logger import get_logger
@@ -11,6 +12,16 @@ logger = get_logger("Models.receipt_repository")
 
 class ReceiptRepository:
     TABLE = "receipts"
+
+    FALLBACK_RECEIPT: dict[str, Any] = {
+        "merchant_name": "[Encrypted Receipt]",
+        "total_amount": 0.0,
+        "currency": "USD",
+        "date": "1970-01-01",
+        "category": "Other",
+        "items": [],
+        "_decryption_error": True,
+    }
 
     def __init__(self, db: AsyncClient):
         self.db = db
@@ -64,7 +75,9 @@ class ReceiptRepository:
             rows = response.data if response else []
             for row in rows:
                 if "receipt" in row and row["receipt"] is not None:
-                    row["receipt"] = self.crypto.decrypt_json(row["receipt"])
+                    row["receipt"] = self.crypto.safe_decrypt_json(
+                        row["receipt"], context="receipts.receipt", fallback=self.FALLBACK_RECEIPT
+                    )
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "SELECT receipts get_all_by_identity succeeded: returned %d rows in %.2fms",
@@ -102,7 +115,9 @@ class ReceiptRepository:
             response = await query.maybe_single().execute()
             result = response.data if response else None
             if result and "receipt" in result and result["receipt"] is not None:
-                result["receipt"] = self.crypto.decrypt_json(result["receipt"])
+                result["receipt"] = self.crypto.safe_decrypt_json(
+                    result["receipt"], context="receipts.receipt", fallback=self.FALLBACK_RECEIPT
+                )
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "SELECT receipt get_by_id finished: found=%s in %.2fms",
@@ -159,7 +174,9 @@ class ReceiptRepository:
             response = await self.db.table(self.TABLE).insert(row).execute()
             created_row = response.data[0]
             if "receipt" in created_row and created_row["receipt"] is not None:
-                created_row["receipt"] = self.crypto.decrypt_json(created_row["receipt"])
+                created_row["receipt"] = self.crypto.safe_decrypt_json(
+                    created_row["receipt"], context="receipts.receipt", fallback=self.FALLBACK_RECEIPT
+                )
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "INSERT receipt create succeeded: id=%s in %.2fms",
@@ -215,7 +232,9 @@ class ReceiptRepository:
             inserted_rows = response.data if response else []
             for row in inserted_rows:
                 if "receipt" in row and row["receipt"] is not None:
-                    row["receipt"] = self.crypto.decrypt_json(row["receipt"])
+                    row["receipt"] = self.crypto.safe_decrypt_json(
+                        row["receipt"], context="receipts.receipt", fallback=self.FALLBACK_RECEIPT
+                    )
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "INSERT receipts create_batch succeeded: inserted %d rows in %.2fms",
@@ -274,7 +293,9 @@ class ReceiptRepository:
             response = await query.execute()
             updated_row = response.data[0] if (response and response.data) else None
             if updated_row and "receipt" in updated_row and updated_row["receipt"] is not None:
-                updated_row["receipt"] = self.crypto.decrypt_json(updated_row["receipt"])
+                updated_row["receipt"] = self.crypto.safe_decrypt_json(
+                    updated_row["receipt"], context="receipts.receipt", fallback=self.FALLBACK_RECEIPT
+                )
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "UPDATE receipt finished: receipt_id=%s, found=%s in %.2fms",

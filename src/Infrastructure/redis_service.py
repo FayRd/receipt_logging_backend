@@ -257,3 +257,31 @@ def _update_record(key: str, record: dict, r) -> None:
     entry = _memory_store.get(key)
     if entry:
         entry["value"] = record
+
+
+# ── Contact Information Change Cooldown ────────────────────────────────────
+
+def set_contact_change_cooldown(user_id: str, ttl_seconds: int = 300) -> None:
+    """Record a contact change cooldown (default 5 minutes = 300s) in Redis/memory."""
+    key = f"contact_cooldown:{user_id}"
+    r = _get_redis()
+    if r is not None:
+        try:
+            r.set(key, "1", ex=ttl_seconds)
+            return
+        except Exception as e:
+            logger.warning("Redis set_contact_change_cooldown failed: %s; falling back to memory", e)
+    _mem_set(key, {"active": True}, ttl_seconds)
+
+
+def is_contact_change_cooldown_active(user_id: str) -> bool:
+    """Return True if the user is currently within the 5-minute contact change cooldown."""
+    key = f"contact_cooldown:{user_id}"
+    r = _get_redis()
+    if r is not None:
+        try:
+            return bool(r.exists(key))
+        except Exception as e:
+            logger.warning("Redis is_contact_change_cooldown_active failed: %s; falling back to memory", e)
+    return _mem_exists(key)
+

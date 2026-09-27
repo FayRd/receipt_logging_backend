@@ -233,12 +233,30 @@ class UserRepository:
         logger.debug("UPDATE user profile: user_id=%s", user_id)
         try:
             updates: dict = {}
+            current = None
+            if req.email is not None or req.country_code is not None or req.mobile_number is not None:
+                current = await self.get_by_id(user_id)
+
             if req.email is not None:
-                updates["email"] = req.email.strip().lower()
+                new_email = req.email.strip().lower()
+                updates["email"] = new_email
+                current_email = (current.get("email") or "").strip().lower() if current else ""
+                if new_email != current_email:
+                    updates["email_verified_at"] = None
+
             if req.country_code is not None:
                 updates["country_code"] = req.country_code
             if req.mobile_number is not None:
                 updates["mobile_number"] = req.mobile_number
+
+            if current and (req.country_code is not None or req.mobile_number is not None):
+                curr_code = current.get("country_code")
+                curr_num = current.get("mobile_number")
+                if (req.country_code is not None and req.country_code != curr_code) or (
+                    req.mobile_number is not None and req.mobile_number != curr_num
+                ):
+                    updates["mobile_verified_at"] = None
+
             if req.avatar_image_path is not None:
                 updates["avatar_image_path"] = req.avatar_image_path
             if req.custom_categories is not None:

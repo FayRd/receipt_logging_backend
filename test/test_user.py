@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import asyncio
 import uuid
 
 
@@ -173,20 +174,148 @@ def test_user_update_email_success(client, mock_user_session):
 
 
 def test_user_update_profile_duplicate_email(client, mock_user_session):
-    """PATCH /user/me with an email already used by another user returns HTTP 409."""
+    """PATCH /user/me with an email already verified by another user returns HTTP 409."""
+    import datetime
+    from supabase import acreate_client
+    from src.config import get_settings
+
+    settings = get_settings()
+
     # Register a second user
     other_payload = _unique_user()
     other_res = client.post("/api/v1/user/create", json=other_payload)
     assert other_res.status_code == 201
+    other_user_id = other_res.json()["id"]
 
-    # Try to update mock_user_session with the other user's email
+    # Mark second user's email as verified
+    async def _verify(uid: str):
+        db = await acreate_client(settings.supabase_url, settings.supabase_key)
+        await (
+            db.table("users")
+            .update({"email_verified_at": datetime.datetime.now(datetime.timezone.utc).isoformat()})
+            .eq("id", uid)
+            .execute()
+        )
+
+    asyncio.run(_verify(other_user_id))
+
+    # Try to update mock_user_session with the other user's verified email
     response = client.patch(
         "/api/v1/user/me",
         headers=mock_user_session["headers"],
         json={"email": other_payload["email"]},
     )
     assert response.status_code == 409
-    assert "email" in response.json()["detail"].lower()
+    assert "already exists" in response.json()["detail"].lower()
+
+
+def test_user_contact_change_cooldown_and_verification_reset(client, mock_user_session):
+    """PATCH /user/me with email change resets email_verified_at and enforces 5-min cooldown (HTTP 429)."""
+    # 1. First change should succeed
+    new_email = f"cooldown_{uuid.uuid4().hex[:6]}@test.example.com"
+    res1 = client.patch(
+        "/api/v1/user/me",
+        headers=mock_user_session["headers"],
+        json={"email": new_email},
+    )
+    assert res1.status_code == 200
+    data1 = res1.json()
+    assert data1["email"] == new_email
+    assert data1.get("email_verified_at") is None
+
+    # 2. Second change within 5 minutes must return 429
+    res2 = client.patch(
+        "/api/v1/user/me",
+        headers=mock_user_session["headers"],
+        json={"email": f"another_{uuid.uuid4().hex[:6]}@test.example.com"},
+    )
+    assert res2.status_code == 429
+    assert "Please wait and try again later." in res2.json()["detail"]
+
+
+def test_user_email_conflict_displaces_unverified_and_blocks_verified(client, mock_device):
+    """Unverified email can be displaced when another user claims it; verified email returns 409."""
+    import datetime
+    from supabase import acreate_client
+    from src.config import get_settings
+    from src.Models.Users.user_repository import UserRepository
+
+    settings = get_settings()
+
+    # 1. Create User A (unverified)
+    user_a = _unique_user(suffix="_a")
+    res_a = client.post("/api/v1/user/create", json=user_a)
+    assert res_a.status_code == 201
+    user_a_id = res_a.json()["id"]
+
+    # 2. Create User B
+    user_b = _unique_user(suffix="_b")
+    res_b = client.post("/api/v1/user/create", json=user_b)
+    assert res_b.status_code == 201
+    user_b_id = res_b.json()["id"]
+
+    # User B auth headers
+    headers_b = {
+        "X-Device-Name": mock_device["device_name"],
+        "X-Device-Token": mock_device["device_token"],
+        "X-User-Name": user_b["username"],
+        "X-User-Token": user_b["password"],
+    }
+    # Link device to User B
+    client.post(
+        "/api/v1/devices/link",
+        json={"device_name": mock_device["device_name"], "username": user_b["username"]},
+        headers=headers_b,
+    )
+
+    # 3. User B claims User A's unverified email -> Should displace User A and succeed
+    claim_res = client.patch(
+        "/api/v1/user/me",
+        headers=headers_b,
+        json={"email": user_a["email"]},
+    )
+    assert claim_res.status_code == 200
+    assert claim_res.json()["email"] == user_a["email"]
+
+    # Check User A's email is displaced and verify User B's email
+    async def _check_and_verify():
+        db = await acreate_client(settings.supabase_url, settings.supabase_key)
+        repo = UserRepository(db)
+        updated_a = await repo.get_by_id(user_a_id)
+        assert updated_a["email"] == f"unverified_{user_a_id}@sancfund.internal"
+        await (
+            db.table("users")
+            .update({"email_verified_at": datetime.datetime.now(datetime.timezone.utc).isoformat()})
+            .eq("id", user_b_id)
+            .execute()
+        )
+
+    asyncio.run(_check_and_verify())
+
+    # 4. Create User C and try to claim User B's now-verified email
+    user_c = _unique_user(suffix="_c")
+    res_c = client.post("/api/v1/user/create", json=user_c)
+    assert res_c.status_code == 201
+
+    headers_c = {
+        "X-Device-Name": mock_device["device_name"],
+        "X-Device-Token": mock_device["device_token"],
+        "X-User-Name": user_c["username"],
+        "X-User-Token": user_c["password"],
+    }
+    client.post(
+        "/api/v1/devices/link",
+        json={"device_name": mock_device["device_name"], "username": user_c["username"]},
+        headers=headers_c,
+    )
+
+    conflict_res = client.patch(
+        "/api/v1/user/me",
+        headers=headers_c,
+        json={"email": user_a["email"]},  # which is now verified by User B
+    )
+    assert conflict_res.status_code == 409
+    assert "already exists" in conflict_res.json()["detail"].lower()
 
 
 def test_user_update_profile_unauthorized(client, mock_device):

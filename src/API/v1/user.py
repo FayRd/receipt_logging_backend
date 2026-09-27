@@ -31,6 +31,7 @@ from src.Models.Users.user_repository import UserRepository
 from src.Models.Users.password_reset_repository import PasswordResetRepository
 from src.Services.image_service import ImageStorageService, validate_image_size
 from src.Auth.jwt_token import create_access_token, create_refresh_token, verify_jwt_token
+from src.Infrastructure.redis_service import is_contact_change_cooldown_active, set_contact_change_cooldown
 from src.config import get_settings
 
 router = APIRouter(prefix="/user", tags=["Users"])
@@ -490,11 +491,59 @@ async def update_my_profile(
         [k for k, v in update_req.model_dump().items() if v is not None],
     )
 
+    # Check if contact fields are changing
+    email_changing = False
+    new_email: str | None = None
+    current_user = None
+
     if update_req.email is not None:
-        existing = await repo.get_by_email(update_req.email)
+        new_email = update_req.email.strip().lower()
+        current_user = await repo.get_by_id(identity.user_id)
+        current_email = (current_user.get("email") or "").strip().lower() if current_user else ""
+        if new_email and new_email != current_email:
+            email_changing = True
+
+    mobile_changing = False
+    if update_req.country_code is not None or update_req.mobile_number is not None:
+        if not current_user:
+            current_user = await repo.get_by_id(identity.user_id)
+        curr_cc = current_user.get("country_code") if current_user else None
+        curr_mn = current_user.get("mobile_number") if current_user else None
+        if (update_req.country_code is not None and update_req.country_code != curr_cc) or (
+            update_req.mobile_number is not None and update_req.mobile_number != curr_mn
+        ):
+            mobile_changing = True
+
+    if email_changing or mobile_changing:
+        if is_contact_change_cooldown_active(identity.user_id):
+            logger.warning(
+                "Profile update rejected: 5-minute contact cooldown active for user_id=%s",
+                identity.user_id,
+            )
+            raise HTTPException(
+                status_code=429,
+                detail="Please wait and try again later.",
+            )
+
+    if email_changing and new_email:
+        existing = await repo.get_by_email(new_email)
         if existing and existing.get("id") != identity.user_id:
-            logger.warning("Profile update failed: Email '%s' already taken by another user", update_req.email)
-            raise HTTPException(status_code=409, detail="An account with this email already exists.")
+            if existing.get("email_verified_at"):
+                logger.warning(
+                    "Profile update failed: Email '%s' already taken and verified by %s",
+                    new_email,
+                    existing.get("id"),
+                )
+                raise HTTPException(status_code=409, detail="An account with this email already exists.")
+            else:
+                displaced_email = f"unverified_{existing['id']}@sancfund.internal"
+                logger.info(
+                    "Displacing unverified account email: user_id=%s, email=%s -> %s",
+                    existing["id"],
+                    new_email,
+                    displaced_email,
+                )
+                await repo.update_profile(existing["id"], UserUpdateRequest(email=displaced_email))
 
     # Handle avatar upload if present
     if avatar_bytes and len(avatar_bytes) > 0:
@@ -523,6 +572,11 @@ async def update_my_profile(
     if not updated:
         logger.warning("Profile update failed: User not found for user_id=%s", identity.user_id)
         raise HTTPException(status_code=404, detail="User not found.")
+
+    if email_changing or mobile_changing:
+        set_contact_change_cooldown(identity.user_id, ttl_seconds=300)
+        logger.info("5-minute contact change cooldown activated for user_id=%s", identity.user_id)
+
     logger.info("Profile updated successfully for user_id=%s", identity.user_id)
     return updated
 

@@ -1,19 +1,83 @@
-__pycache__
+# Bytecode and Cache
+__pycache__/
 *.py[cod]
 *$py.class
-.pytest_cache
-.venv
-venv
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Virtual Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Environment Variables & Secrets
+# (Runtime secrets should be injected via container environment variables or secrets manager)
 .env
 .env.*
+*.env
+develop.env
+staging.env
 !.env.example
-.git
-.gitignore
+
+# Database Backups & Local Data Snapshots
+database/
+*.csv
+*.sqlite3
+*.db
+
+# Administrative, Migration & Key Rotation Scripts
+scripts/
+migration/
+failed_rows_*.log
+key_rotation_log.md
+
+# Logs
 *.log
+**/*.log
 app.log
 otp_dev.log
-.agents
-.claude
-.github
+
+# Git & Version Control
+.git/
+.gitignore
+.gitattributes
+.github/
+
+# IDE, Editor & OS Artifacts
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Documentation & Specifications
+*.md
+PROJECT_SCOPE.md
+project_struc.md
+API.md
+README.md
+
+# Tests & Coverage
 test/
-migration/
+tests/
+.coverage
+coverage.xml
+htmlcov/
+
+# Local Dev Scripts & Container Definitions
+run.ps1
+run.sh
+docker-compose*.yml
+Dockerfile
+.dockerignore
+skills-lock.json
+
+# Tooling & Agent Workspace Directories
+.agents/
+.claude/
+.gemini/
+artifacts/

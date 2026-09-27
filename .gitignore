@@ -1,13 +1,14 @@
 __pycache__
 .claude
 .venv
-.env
+*.env
 artifacts/
 otp_dev.log
 app.log
 
 # Migration & Key Rotation Scripts (contain sensitive credential prompts & procedures)
 scripts/
+database/
 
 # Rotation / Migration Audit & Error Logs
 failed_rows_*.log

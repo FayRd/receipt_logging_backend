@@ -1,18 +1,23 @@
 import json
 import math
+import re
 import secrets
 from datetime import datetime, timezone
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from supabase import AsyncClient
 from src.Infrastructure.database import get_supabase_client
 from src.Auth.identity import Identity, get_user_identity, get_scoped_identity
 from src.Auth.rate_limiter import rate_limit
+from src.Auth.google_auth import verify_google_id_token
 from src.Infrastructure.logger import get_logger
 from src.Models.schemas import (
     UserCreateRequest,
     UserLoginRequest,
     UserRecord,
     UserLoginResponse,
+    GoogleAuthRequest,
+    GoogleAuthResponse,
     UserUpdateRequest,
     CustomCategorySchema,
     PasswordResetInitiateRequest,
@@ -114,8 +119,9 @@ async def login_user(
         raise HTTPException(status_code=401, detail="Invalid username or password.")
 
     incoming_hash = repo.hash_password(body.password)
-    if incoming_hash != user.get("password", ""):
-        logger.warning("Login failed for user_id=%s: incorrect password", user.get("id"))
+    stored_hash = user.get("password") or ""
+    if not stored_hash or not secrets.compare_digest(incoming_hash, stored_hash):
+        logger.warning("Login failed for user_id=%s: incorrect password or passwordless account", user.get("id"))
         raise HTTPException(status_code=401, detail="Invalid username or password.")
 
     user.pop("password", None)
@@ -130,6 +136,237 @@ async def login_user(
         success=True,
         user=user,
         message="Login successful.",
+        access_token=access_token,
+        refresh_token=refresh_token,
+        token_type="bearer",
+        expires_in=expires_in_sec,
+    )
+
+
+async def _download_and_upload_google_avatar(
+    user_id: str,
+    picture_url: str | None,
+    image_storage: ImageStorageService,
+) -> str | None:
+    """Download Google profile picture binary and store in Supabase Storage in 3 resolutions."""
+    if not picture_url or not picture_url.startswith("http"):
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            resp = await client.get(picture_url)
+            if resp.status_code == 200 and resp.content:
+                folder_path = await image_storage.upload_avatar(
+                    user_id=user_id,
+                    image_bytes=resp.content,
+                    target_max_bytes=_settings.max_compressed_image_bytes,
+                )
+                logger.info(
+                    "google_auth: ingested Google avatar to object storage -> %s for user_id=%s",
+                    folder_path,
+                    user_id,
+                )
+                return folder_path
+            else:
+                logger.warning(
+                    "google_auth: failed to download Google avatar: HTTP %s", resp.status_code
+                )
+    except Exception as exc:
+        logger.warning("google_auth: error downloading/uploading Google avatar: %s", exc)
+    return None
+
+
+async def _suggest_google_username(email: str, name: str, repo: UserRepository) -> str:
+    """Generate an available 3-10 character username based on Google display name or email."""
+    base = re.sub(r"[^a-zA-Z0-9_]", "", name.lower()) if name else ""
+    if not base:
+        base = email.split("@")[0]
+        base = re.sub(r"[^a-zA-Z0-9_]", "", base.lower())
+    suggested = base[:10]
+    if len(suggested) < 3:
+        suggested = f"{suggested}user"[:10]
+    if await repo.get_by_username(suggested):
+        suffix = secrets.token_hex(2)
+        suggested = f"{suggested[:6]}_{suffix}"[:10]
+    return suggested
+
+
+async def _handle_google_unverified_claim(
+    user_by_email: dict,
+    google_id: str,
+    picture: str | None,
+    repo: UserRepository,
+    image_storage: ImageStorageService,
+) -> GoogleAuthResponse:
+    """Claim an unverified account with Google OAuth (OWASP Pre-Account Takeover Defense)."""
+    logger.info("google_auth: claiming unverified account id=%s with google_id=%s", user_by_email.get("id"), google_id)
+    claimed_user = await repo.claim_unverified_account_with_google(user_by_email["id"], google_id)
+    claimed_user.pop("password", None)
+
+    if not claimed_user.get("avatar_image_path") and picture:
+        avatar_folder = await _download_and_upload_google_avatar(
+            user_id=claimed_user["id"],
+            picture_url=picture,
+            image_storage=image_storage,
+        )
+        if avatar_folder:
+            await repo.update_profile(
+                claimed_user["id"],
+                UserUpdateRequest(avatar_image_path=avatar_folder),
+            )
+            claimed_user["avatar_image_path"] = avatar_folder
+
+    access_token = create_access_token(user_id=claimed_user["id"], username=claimed_user["username"])
+    refresh_token = create_refresh_token(user_id=claimed_user["id"], username=claimed_user["username"])
+    expires_in_sec = _settings.jwt_access_token_expire_minutes * 60
+    return GoogleAuthResponse(
+        success=True,
+        needs_username=False,
+        is_new_user=False,
+        user=claimed_user,
+        message="Account linked and verified with Google successfully.",
+        access_token=access_token,
+        refresh_token=refresh_token,
+        token_type="bearer",
+        expires_in=expires_in_sec,
+    )
+
+
+# ── POST /user/auth/google ───────────────────────────────────────────────────
+@router.post(
+    "/auth/google",
+    response_model=GoogleAuthResponse,
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_auth_per_minute))],
+)
+async def google_auth(
+    body: GoogleAuthRequest,
+    repo: UserRepository = Depends(get_repo),
+    image_storage: ImageStorageService = Depends(get_image_storage),
+):
+    """Authenticate or register a user via Google OAuth (OIDC ID Token).
+
+    Flow:
+    1. Cryptographically verify the Google ID token.
+    2. If active user exists with this google_id, log them in immediately (is_new_user=False).
+    3. If active user exists with this email:
+       - If email is already verified: reject with 409 Conflict ("Email already in use.")
+       - If email is unverified: claim account (link google_id, verify email, purge password stub, ingest avatar if missing, is_new_user=False).
+    4. If new user:
+       - If username not provided, return needs_username: True with suggested username.
+       - If username provided, validate uniqueness & format, create user, ingest avatar to Supabase Storage, return is_new_user=True.
+    """
+    logger.debug("Entering google_auth")
+    try:
+        claims = verify_google_id_token(body.id_token, client_id=_settings.google_client_id)
+    except ValueError as e:
+        logger.warning("google_auth: token verification failed: %s", e)
+        raise HTTPException(status_code=401, detail="Invalid Google authentication token.")
+
+    google_id = str(claims.get("sub", "")).strip()
+    email = str(claims.get("email", "")).strip().lower()
+    name = str(claims.get("name", "")).strip()
+    picture = claims.get("picture")
+
+    if not google_id or not email:
+        raise HTTPException(status_code=400, detail="Invalid token claims: missing subject or email.")
+
+    # 1. Existing user by Google ID
+    user_by_gid = await repo.get_by_google_id(google_id)
+    if user_by_gid:
+        user_by_gid.pop("password", None)
+        logger.info("google_auth: logged in existing user by google_id=%s, user_id=%s", google_id, user_by_gid.get("id"))
+        access_token = create_access_token(user_id=user_by_gid["id"], username=user_by_gid["username"])
+        refresh_token = create_refresh_token(user_id=user_by_gid["id"], username=user_by_gid["username"])
+        expires_in_sec = _settings.jwt_access_token_expire_minutes * 60
+        return GoogleAuthResponse(
+            success=True,
+            needs_username=False,
+            is_new_user=False,
+            user=user_by_gid,
+            message="Login successful.",
+            access_token=access_token,
+            refresh_token=refresh_token,
+            token_type="bearer",
+            expires_in=expires_in_sec,
+        )
+
+    # 2. Existing user by email
+    user_by_email = await repo.get_by_email(email)
+    if user_by_email:
+        # Check if already verified
+        if user_by_email.get("email_verified_at") is not None:
+            logger.warning("google_auth: conflict - email '%s' already verified with account id=%s", email, user_by_email.get("id"))
+            raise HTTPException(status_code=409, detail="Email already in use.")
+
+        # Unverified account claim (OWASP Pre-Account Takeover Defense)
+        return await _handle_google_unverified_claim(
+            user_by_email=user_by_email,
+            google_id=google_id,
+            picture=picture,
+            repo=repo,
+            image_storage=image_storage,
+        )
+
+    # 3. New User Registration
+    clean_username = body.username.strip() if body.username else ""
+    if not clean_username:
+        suggested = await _suggest_google_username(email=email, name=name, repo=repo)
+        logger.info("google_auth: new Google user '%s' requires username selection. Suggested: '%s'", email, suggested)
+        return GoogleAuthResponse(
+            success=True,
+            needs_username=True,
+            is_new_user=False,
+            suggested_username=suggested,
+            email=email,
+            display_name=name,
+            message="Username required to complete registration.",
+        )
+
+    # Validate provided username format
+    if not re.match(r"^[a-zA-Z0-9_]{3,10}$", clean_username):
+        raise HTTPException(
+            status_code=422,
+            detail="Username must be 3-10 characters (letters, numbers, and underscores only).",
+        )
+
+    if await repo.get_by_username(clean_username):
+        logger.warning("google_auth: chosen username '%s' already taken", clean_username)
+        raise HTTPException(status_code=409, detail="Username already taken.")
+
+    # Create new user authenticated via Google
+    new_user = await repo.create_google_user(
+        google_id=google_id,
+        email=email,
+        username=clean_username,
+        avatar_image_path=None,
+        preferences=body.preferences,
+    )
+    new_user.pop("password", None)
+
+    # Ingest Google profile picture into Supabase Object Storage
+    avatar_folder = await _download_and_upload_google_avatar(
+        user_id=new_user["id"],
+        picture_url=picture,
+        image_storage=image_storage,
+    )
+    if avatar_folder:
+        await repo.update_profile(
+            new_user["id"],
+            UserUpdateRequest(avatar_image_path=avatar_folder),
+        )
+        new_user["avatar_image_path"] = avatar_folder
+
+    logger.info("google_auth: successfully registered user_id=%s, username=%s via Google (avatar=%s)", new_user.get("id"), clean_username, new_user.get("avatar_image_path"))
+
+    access_token = create_access_token(user_id=new_user["id"], username=new_user["username"])
+    refresh_token = create_refresh_token(user_id=new_user["id"], username=new_user["username"])
+    expires_in_sec = _settings.jwt_access_token_expire_minutes * 60
+
+    return GoogleAuthResponse(
+        success=True,
+        needs_username=False,
+        is_new_user=True,
+        user=new_user,
+        message="User registered and logged in successfully.",
         access_token=access_token,
         refresh_token=refresh_token,
         token_type="bearer",

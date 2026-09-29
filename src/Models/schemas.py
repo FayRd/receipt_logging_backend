@@ -230,6 +230,7 @@ class UserRecord(BaseModel):
     id: str
     username: str
     email: str
+    google_id: str | None = None
     country_code: str | None = None
     mobile_number: str | None = None
     avatar_image_path: str | None = None
@@ -260,6 +261,29 @@ class UserLoginResponse(BaseModel):
     success: bool
     user: UserRecord
     message: str
+    access_token: str | None = None
+    refresh_token: str | None = None
+    token_type: str = "bearer"
+    expires_in: int | None = None
+
+
+class GoogleAuthRequest(BaseModel):
+    """Request body for Google OAuth authentication."""
+    id_token: str = Field(..., description="Google ID Token obtained from Google Sign-In.")
+    username: str | None = Field(default=None, description="Optional chosen username for first-time registration.")
+    preferences: dict[str, Any] | None = Field(default=None, description="Optional UI/device preferences.")
+
+
+class GoogleAuthResponse(BaseModel):
+    """Unified response model for Google OAuth login/signup endpoint."""
+    success: bool = True
+    needs_username: bool = False
+    is_new_user: bool = False
+    suggested_username: str | None = None
+    email: str | None = None
+    display_name: str | None = None
+    user: UserRecord | None = None
+    message: str = ""
     access_token: str | None = None
     refresh_token: str | None = None
     token_type: str = "bearer"

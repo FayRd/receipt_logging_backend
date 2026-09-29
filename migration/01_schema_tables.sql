@@ -13,7 +13,8 @@ CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     username TEXT UNIQUE NOT NULL,
     email TEXT UNIQUE NOT NULL,
-    password TEXT NOT NULL,
+    password TEXT,
+    google_id TEXT UNIQUE,
     country_code TEXT,
     mobile_number TEXT,
     avatar_image_path TEXT,
@@ -27,16 +28,38 @@ CREATE TABLE IF NOT EXISTS users (
     deleted_at TIMESTAMPTZ
 );
 
+DO $$ 
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'users' AND column_name = 'google_id'
+    ) THEN
+        ALTER TABLE users ADD COLUMN google_id TEXT;
+    END IF;
+    ALTER TABLE users ALTER COLUMN password DROP NOT NULL;
+END $$;
+
 -- 2. Devices Table
 CREATE TABLE IF NOT EXISTS devices (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT UNIQUE NOT NULL,
     device_token_hash TEXT NOT NULL,
     user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    trial_consumed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     deleted_at TIMESTAMPTZ
 );
+
+DO $$ 
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'devices' AND column_name = 'trial_consumed_at'
+    ) THEN
+        ALTER TABLE devices ADD COLUMN trial_consumed_at TIMESTAMPTZ;
+    END IF;
+END $$;
 
 -- 3. Receipts Table
 CREATE TABLE IF NOT EXISTS receipts (

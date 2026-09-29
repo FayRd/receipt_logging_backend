@@ -8,7 +8,7 @@ from src.Models.schemas import UserCreateRequest, UserUpdateRequest
 logger = get_logger("Models.user_repository")
 
 # Columns returned in all sanitized (non-auth) user fetches
-_USER_SAFE_COLUMNS = "id, username, email, country_code, mobile_number, avatar_image_path, custom_categories, preferences, email_verified_at, mobile_verified_at, tier, created_at, deleted_at"
+_USER_SAFE_COLUMNS = "id, username, email, google_id, country_code, mobile_number, avatar_image_path, custom_categories, preferences, email_verified_at, mobile_verified_at, tier, created_at, deleted_at"
 
 
 
@@ -60,6 +60,29 @@ class UserRepository:
         except Exception as e:
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.error("Database error in SELECT user get_by_username '%s' after %.2fms: %s", clean_user, duration_ms, e, exc_info=True)
+            raise
+
+    async def get_by_google_id(self, google_id: str) -> dict | None:
+        """Fetch an active user row by Google ID."""
+        start_time = time.perf_counter()
+        clean_gid = google_id.strip()
+        logger.debug("SELECT user get_by_google_id: google_id='%s'", clean_gid)
+        try:
+            res = await (
+                self.db.table(self.TABLE)
+                .select("*")
+                .eq("google_id", clean_gid)
+                .is_("deleted_at", "null")
+                .maybe_single()
+                .execute()
+            )
+            result = res.data if res else None
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.info("SELECT user get_by_google_id finished: found=%s in %.2fms", result is not None, duration_ms)
+            return result
+        except Exception as e:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.error("Database error in SELECT user get_by_google_id '%s' after %.2fms: %s", clean_gid, duration_ms, e, exc_info=True)
             raise
 
     async def get_by_email(self, email: str) -> dict | None:
@@ -203,6 +226,9 @@ class UserRepository:
                 tier = "premium"
                 prefs["trial_start_at"] = now.isoformat()
                 prefs["is_in_trial"] = True
+                if device_id:
+                    prefs["trial_device_id"] = device_id
+                    await self.mark_device_trial_consumed(device_id)
                 logger.info("Granting 14-day reverse Premium trial to new user '%s'", req.username)
 
             row = {
@@ -225,6 +251,93 @@ class UserRepository:
         except Exception as e:
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.error("Database error in INSERT user create username='%s' after %.2fms: %s", req.username, duration_ms, e, exc_info=True)
+            raise
+
+    async def create_google_user(
+        self,
+        google_id: str,
+        email: str,
+        username: str,
+        avatar_image_path: str | None = None,
+        preferences: dict | None = None,
+    ) -> dict:
+        """Insert a new user authenticated via Google OAuth with email_verified_at set and password null."""
+        start_time = time.perf_counter()
+        logger.debug("INSERT google user create: username='%s', email='%s', google_id='%s'", username, email, google_id)
+        try:
+            prefs = dict(preferences) if preferences is not None else {}
+            device_id = prefs.get("trial_device_id")
+            is_device_reused = False
+            if device_id:
+                is_device_reused = await self.check_device_trial_used(device_id)
+
+            now = datetime.now(timezone.utc)
+            if is_device_reused:
+                tier = "free"
+                prefs["is_in_trial"] = False
+                prefs["trial_ineligible"] = True
+                logger.info("Device %s already consumed trial. Account '%s' created on Free tier.", device_id, username)
+            else:
+                tier = "premium"
+                prefs["trial_start_at"] = now.isoformat()
+                prefs["is_in_trial"] = True
+                if device_id:
+                    prefs["trial_device_id"] = device_id
+                    await self.mark_device_trial_consumed(device_id)
+                logger.info("Granting 14-day reverse Premium trial to new Google user '%s'", username)
+
+            row = {
+                "username": username.strip(),
+                "email": email.strip().lower(),
+                "password": None,
+                "google_id": google_id.strip(),
+                "email_verified_at": now.isoformat(),
+                "country_code": None,
+                "mobile_number": None,
+                "avatar_image_path": avatar_image_path,
+                "custom_categories": [],
+                "preferences": prefs,
+                "tier": tier,
+            }
+            res = await self.db.table(self.TABLE).insert(row).execute()
+            user_data = res.data[0]
+            user_data.pop("password", None)
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.info("INSERT google user create succeeded: id=%s, tier=%s in %.2fms", user_data.get("id"), user_data.get("tier"), duration_ms)
+            return user_data
+        except Exception as e:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.error("Database error in INSERT google user create username='%s' after %.2fms: %s", username, duration_ms, e, exc_info=True)
+            raise
+
+    async def claim_unverified_account_with_google(self, user_id: str, google_id: str) -> dict:
+        """Link Google ID to an unverified user account, verify email, and purge existing password stub (OWASP pre-takeover defense)."""
+        start_time = time.perf_counter()
+        logger.debug("CLAIM unverified user: user_id='%s', google_id='%s'", user_id, google_id)
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            payload = {
+                "google_id": google_id.strip(),
+                "email_verified_at": now_iso,
+                "password": None,  # Purge password to block attacker's stub backdoor
+                "updated_at": now_iso,
+            }
+            res = await (
+                self.db.table(self.TABLE)
+                .update(payload)
+                .eq("id", user_id)
+                .is_("deleted_at", "null")
+                .execute()
+            )
+            updated = (res.data[0] if res and res.data else await self.get_by_id(user_id))
+            if updated and "password" in updated:
+                updated.pop("password", None)
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.info("CLAIM user completed: user_id=%s in %.2fms", user_id, duration_ms)
+            return updated
+        except Exception as e:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.error("Database error in claim_unverified_account_with_google user_id=%s after %.2fms: %s", user_id, duration_ms, e, exc_info=True)
             raise
 
     async def update_profile(self, user_id: str, req: UserUpdateRequest) -> dict | None:
@@ -441,19 +554,32 @@ class UserRepository:
             return False
         clean_device = device_id.strip()
         try:
-            # 1. Check users table preferences for trial_device_id
+            # 1. Check devices table if device was flagged with trial_consumed_at
+            res_dev_trial = await (
+                self.db.table("devices")
+                .select("id")
+                .eq("name", clean_device)
+                .not_.is_("trial_consumed_at", "null")
+                .limit(1)
+                .execute()
+            )
+            if res_dev_trial and res_dev_trial.data:
+                logger.info("check_device_trial_used: matched devices.trial_consumed_at for device=%s", clean_device)
+                return True
+
+            # 2. Check users table preferences for trial_device_id across ALL users (including soft-deleted)
             res = await (
                 self.db.table(self.TABLE)
                 .select("id")
                 .contains("preferences", {"trial_device_id": clean_device})
-                .is_("deleted_at", "null")
                 .limit(1)
                 .execute()
             )
             if res and res.data:
+                logger.info("check_device_trial_used: matched users.preferences.trial_device_id for device=%s", clean_device)
                 return True
 
-            # 2. Check devices table if device was registered and linked to an account
+            # 3. Check devices table if device was registered and linked to an account
             res_dev = await (
                 self.db.table("devices")
                 .select("id, user_id")
@@ -464,12 +590,42 @@ class UserRepository:
                 .execute()
             )
             if res_dev and res_dev.data:
+                logger.info("check_device_trial_used: matched active devices.user_id for device=%s", clean_device)
                 return True
 
             return False
         except Exception as e:
             logger.warning("Error checking device trial consumption for device=%s: %s", clean_device, e)
             return False
+
+    async def mark_device_trial_consumed(self, device_id: str | None) -> None:
+        """Mark a device as having consumed its 14-day trial in the devices table."""
+        if not device_id or not device_id.strip():
+            return
+        clean_device = device_id.strip()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        try:
+            # Attempt to update existing device record
+            res = await (
+                self.db.table("devices")
+                .update({"trial_consumed_at": now_iso})
+                .eq("name", clean_device)
+                .execute()
+            )
+            if not res or not res.data:
+                # If device record does not yet exist in devices table, insert it
+                await (
+                    self.db.table("devices")
+                    .insert({
+                        "name": clean_device,
+                        "device_token_hash": "unregistered_trial_holder",
+                        "trial_consumed_at": now_iso,
+                    })
+                    .execute()
+                )
+            logger.info("Marked device '%s' as trial consumed at %s", clean_device, now_iso)
+        except Exception as e:
+            logger.warning("Failed to record trial_consumed_at for device '%s': %s", clean_device, e)
 
     async def simulate_trial_expiry(self, user_id: str) -> dict | None:
         """Simulate 14-day trial expiration by setting trial_start_at to 15 days ago and applying downgrade."""
@@ -513,7 +669,9 @@ class UserRepository:
             prefs["trial_start_at"] = iso_ts
             prefs["is_in_trial"] = True
             if device_id:
-                prefs["trial_device_id"] = device_id.strip()
+                clean_dev = device_id.strip()
+                prefs["trial_device_id"] = clean_dev
+                await self.mark_device_trial_consumed(clean_dev)
 
             res = await (
                 self.db.table(self.TABLE)

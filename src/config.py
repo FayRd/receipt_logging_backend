@@ -103,6 +103,9 @@ class Settings(BaseSettings):
     jwt_access_token_expire_minutes: int = 15
     jwt_refresh_token_expire_days: int = 30
 
+    # Google OAuth / Social Authentication
+    google_client_id: str = ""
+
     # Tier Daily Quota Configuration
     # Limits for /scan/* (scans/day) and /chat/query (tokens/day). -1 means unlimited.
     tier_quotas: dict[str, dict[str, int]] = {

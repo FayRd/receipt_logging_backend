@@ -60,7 +60,9 @@ DROP INDEX IF EXISTS idx_conversations_identity;
 DROP INDEX IF EXISTS idx_receipts_identity;
 DROP INDEX IF EXISTS idx_devices_user;
 DROP INDEX IF EXISTS idx_devices_hardware;
+DROP INDEX IF EXISTS idx_devices_trial_consumed;
 DROP INDEX IF EXISTS idx_users_mobile;
+DROP INDEX IF EXISTS idx_users_google_id;
 DROP INDEX IF EXISTS idx_users_email;
 DROP INDEX IF EXISTS idx_users_username;
 

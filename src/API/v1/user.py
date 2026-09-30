@@ -18,6 +18,9 @@ from src.Models.schemas import (
     UserLoginResponse,
     GoogleAuthRequest,
     GoogleAuthResponse,
+    Login2FAVerifyRequest,
+    Login2FAResendRequest,
+    TwoFactorToggleRequest,
     UserUpdateRequest,
     CustomCategorySchema,
     PasswordResetInitiateRequest,
@@ -35,8 +38,25 @@ from src.Models.schemas import (
 from src.Models.Users.user_repository import UserRepository
 from src.Models.Users.password_reset_repository import PasswordResetRepository
 from src.Services.image_service import ImageStorageService, validate_image_size
-from src.Auth.jwt_token import create_access_token, create_refresh_token, verify_jwt_token
-from src.Infrastructure.redis_service import is_contact_change_cooldown_active, set_contact_change_cooldown
+from src.Auth.jwt_token import (
+    create_access_token,
+    create_refresh_token,
+    create_2fa_temp_token,
+    verify_jwt_token,
+)
+from src.Infrastructure.redis_service import (
+    is_contact_change_cooldown_active,
+    set_contact_change_cooldown,
+    generate_otp,
+    store_otp,
+    verify_otp,
+    check_resend_cooldown,
+    set_resend_cooldown,
+)
+from src.Services.email_service import (
+    send_2fa_login_email,
+    send_2fa_action_email,
+)
 from src.config import get_settings
 
 router = APIRouter(prefix="/user", tags=["Users"])
@@ -96,6 +116,50 @@ async def create_user(
     return user
 
 
+def _mask_email(email: str) -> str:
+    """Mask email for privacy, e.g. true.ression@gmail.com -> t***n@gmail.com."""
+    if not email or "@" not in email:
+        return "***"
+    local_part, domain = email.split("@", 1)
+    if len(local_part) <= 2:
+        masked_local = local_part[0] + "***"
+    else:
+        masked_local = local_part[0] + "***" + local_part[-1]
+    return f"{masked_local}@{domain}"
+
+
+async def _trigger_2fa_login_challenge(user: dict) -> tuple[str, str]:
+    """Generate 6-digit OTP, store in Redis (2fa_login), send email, and return (temp_token, masked_email)."""
+    user_id = str(user["id"])
+    email = str(user.get("email") or "").strip().lower()
+    username = str(user.get("username") or "User")
+
+    otp = generate_otp()
+    store_otp(user_id, "2fa_login", email, otp)
+    await send_2fa_login_email(to_email=email, otp=otp, username=username)
+
+    temp_token = create_2fa_temp_token(user_id=user_id, username=username)
+    masked_email = _mask_email(email)
+    return temp_token, masked_email
+
+
+def _verify_2fa_for_action(user: dict, request: Request) -> None:
+    """If 2FA is enabled for this user, validate the X-2FA-OTP request header against Redis 2fa_action."""
+    if not user.get("is_2fa_enabled"):
+        return
+    otp = request.headers.get("x-2fa-otp") or request.headers.get("x-2fa-code")
+    if not otp:
+        raise HTTPException(
+            status_code=403,
+            detail="Two-factor authentication code required.",
+            headers={"X-2FA-Required": "true"},
+        )
+    email = str(user.get("email") or "").strip().lower()
+    ok, error_msg = verify_otp(str(user["id"]), "2fa_action", email, otp.strip())
+    if not ok:
+        raise HTTPException(status_code=400, detail=error_msg)
+
+
 # ── POST /user/login ──────────────────────────────────────────────────────────
 @router.post(
     "/login",
@@ -109,6 +173,7 @@ async def login_user(
     """Authenticate user credentials and return sanitized user profile.
 
     Supports login via username or email address.
+    If 2FA is enabled, triggers an OTP challenge to the registered email and returns requires_2fa=True.
     Rate limited to protect against brute-force password guessing attacks.
     """
     logger.debug("Entering login_user: identifier=%s", body.username)
@@ -125,6 +190,20 @@ async def login_user(
         raise HTTPException(status_code=401, detail="Invalid username or password.")
 
     user.pop("password", None)
+
+    # If 2FA is enabled, intercept with 2FA challenge flow
+    if user.get("is_2fa_enabled"):
+        temp_token, masked_email = await _trigger_2fa_login_challenge(user)
+        logger.info("2FA login challenge triggered for user_id=%s, username=%s", user.get("id"), user.get("username"))
+        return UserLoginResponse(
+            success=True,
+            requires_2fa=True,
+            temp_token=temp_token,
+            masked_email=masked_email,
+            user=None,
+            message="Two-factor authentication required.",
+        )
+
     logger.info("User logged in successfully: user_id=%s, username=%s", user.get("id"), user.get("username"))
 
     # Issue cryptographically signed JWT tokens
@@ -134,6 +213,7 @@ async def login_user(
 
     return UserLoginResponse(
         success=True,
+        requires_2fa=False,
         user=user,
         message="Login successful.",
         access_token=access_token,
@@ -141,6 +221,94 @@ async def login_user(
         token_type="bearer",
         expires_in=expires_in_sec,
     )
+
+
+# ── POST /user/login-2fa-verify ───────────────────────────────────────────────
+@router.post(
+    "/login-2fa-verify",
+    response_model=UserLoginResponse,
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_auth_per_minute))],
+)
+async def login_2fa_verify(
+    body: Login2FAVerifyRequest,
+    repo: UserRepository = Depends(get_repo),
+):
+    """Verify 2FA OTP code and exchange ephemeral 2fa_challenge token for full session tokens."""
+    logger.debug("Entering login_2fa_verify")
+    payload = verify_jwt_token(body.temp_token, expected_type="2fa_challenge")
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token claims.")
+
+    user = await repo.get_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User account not found.")
+
+    email = str(user.get("email") or "").strip().lower()
+    ok, error_msg = verify_otp(user_id, "2fa_login", email, body.otp)
+    if not ok:
+        logger.warning("login_2fa_verify failed for user_id=%s: %s", user_id, error_msg)
+        raise HTTPException(status_code=400, detail=error_msg)
+
+    user.pop("password", None)
+    access_token = create_access_token(user_id=user["id"], username=user["username"])
+    refresh_token = create_refresh_token(user_id=user["id"], username=user["username"])
+    expires_in_sec = _settings.jwt_access_token_expire_minutes * 60
+
+    logger.info("2FA login verified successfully: user_id=%s", user["id"])
+    return UserLoginResponse(
+        success=True,
+        requires_2fa=False,
+        user=user,
+        message="Login successful.",
+        access_token=access_token,
+        refresh_token=refresh_token,
+        token_type="bearer",
+        expires_in=expires_in_sec,
+    )
+
+
+# ── POST /user/login-2fa-resend ───────────────────────────────────────────────
+@router.post(
+    "/login-2fa-resend",
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_auth_per_minute))],
+)
+async def login_2fa_resend(
+    body: Login2FAResendRequest,
+    repo: UserRepository = Depends(get_repo),
+):
+    """Resend 2FA OTP during login challenge (enforces 60-second cooldown)."""
+    logger.debug("Entering login_2fa_resend")
+    payload = verify_jwt_token(body.temp_token, expected_type="2fa_challenge")
+    user_id = payload.get("sub")
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Invalid token claims.")
+
+    user = await repo.get_by_id(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User account not found.")
+
+    email = str(user.get("email") or "").strip().lower()
+    in_cooldown, seconds_remaining = check_resend_cooldown(user_id, "2fa_login")
+    if in_cooldown:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Please wait {seconds_remaining} second(s) before requesting a new code.",
+        )
+
+    otp = generate_otp()
+    store_otp(user_id, "2fa_login", email, otp)
+    set_resend_cooldown(user_id, "2fa_login")
+
+    username = str(user.get("username") or "User")
+    await send_2fa_login_email(to_email=email, otp=otp, username=username)
+
+    logger.info("2FA login OTP resent successfully for user_id=%s", user_id)
+    return {
+        "success": True,
+        "message": "Verification code dispatched.",
+        "cooldown_seconds": 60,
+    }
 
 
 async def _download_and_upload_google_avatar(
@@ -273,12 +441,27 @@ async def google_auth(
     user_by_gid = await repo.get_by_google_id(google_id)
     if user_by_gid:
         user_by_gid.pop("password", None)
+        if user_by_gid.get("is_2fa_enabled"):
+            temp_token, masked_email = await _trigger_2fa_login_challenge(user_by_gid)
+            logger.info("google_auth: 2FA challenge triggered for google_id=%s, user_id=%s", google_id, user_by_gid.get("id"))
+            return GoogleAuthResponse(
+                success=True,
+                requires_2fa=True,
+                temp_token=temp_token,
+                masked_email=masked_email,
+                needs_username=False,
+                is_new_user=False,
+                user=None,
+                message="Two-factor authentication required.",
+            )
+
         logger.info("google_auth: logged in existing user by google_id=%s, user_id=%s", google_id, user_by_gid.get("id"))
         access_token = create_access_token(user_id=user_by_gid["id"], username=user_by_gid["username"])
         refresh_token = create_refresh_token(user_id=user_by_gid["id"], username=user_by_gid["username"])
         expires_in_sec = _settings.jwt_access_token_expire_minutes * 60
         return GoogleAuthResponse(
             success=True,
+            requires_2fa=False,
             needs_username=False,
             is_new_user=False,
             user=user_by_gid,
@@ -825,14 +1008,24 @@ async def update_my_profile(
     dependencies=[Depends(rate_limit(lambda s: s.rate_limit_crud_per_minute))],
 )
 async def delete_my_profile(
+    request: Request,
     identity: Identity = Depends(get_user_identity),
     repo: UserRepository = Depends(get_repo),
 ):
     """Soft-delete current authenticated user profile.
 
     Requires X-User-Name and X-User-Token headers. Omits device headers.
+    If 2FA is enabled, requires X-2FA-OTP header.
     """
     logger.debug("Entering delete_my_profile: identity (user_id=%s)", identity.user_id)
+    user = await repo.get_by_id(identity.user_id)
+    if not user:
+        logger.warning("Soft-delete profile failed: User not found for user_id=%s", identity.user_id)
+        raise HTTPException(
+            status_code=404,
+            detail="User profile not found or already deleted.",
+        )
+    _verify_2fa_for_action(user, request)
     deleted = await repo.soft_delete(identity.user_id)
     if not deleted:
         logger.warning("Soft-delete profile failed: User not found or already deleted for user_id=%s", identity.user_id)
@@ -1016,6 +1209,7 @@ async def complete_password_reset(
 )
 async def change_password(
     body: ChangePasswordRequest,
+    request: Request,
     identity: Identity = Depends(get_user_identity),
     repo: UserRepository = Depends(get_repo),
 ):
@@ -1023,6 +1217,7 @@ async def change_password(
 
     Requires current session authentication, verifies old password against stored hash,
     enforces password complexity, and strictly requires new_password != old_password.
+    If 2FA is enabled, requires X-2FA-OTP header.
     """
     logger.debug("Entering change_password for user_id=%s", identity.user_id)
     if not identity.is_authenticated or not identity.user_id:
@@ -1032,6 +1227,8 @@ async def change_password(
     if not user:
         logger.warning("Password change failed: user_id=%s not found", identity.user_id)
         raise HTTPException(status_code=404, detail="User account not found.")
+
+    _verify_2fa_for_action(user, request)
 
     # 0. Enforce 7-day rate-limiting cooldown per user
     user_prefs = user.get("preferences")
@@ -1216,6 +1413,130 @@ async def verify_complete(
     updated_user = await repo.evaluate_and_apply_deferred_trial(identity.user_id, identifier, updated_user)
 
     logger.info("verify_complete: email verified for user_id=%s, email=%s", identity.user_id, identifier)
+    return updated_user
+
+
+# ── POST /user/2fa/request-otp ───────────────────────────────────────────────
+@router.post(
+    "/2fa/request-otp",
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_auth_per_minute))],
+)
+async def request_2fa_action_otp(
+    action: str = "security_action",
+    identity: Identity = Depends(get_user_identity),
+    repo: UserRepository = Depends(get_repo),
+):
+    """Request a 6-digit OTP for sensitive operations (enabling/disabling 2FA, password change, account deletion)."""
+    logger.debug("Entering request_2fa_action_otp: user_id=%s, action=%s", identity.user_id, action)
+    if not identity.is_authenticated or not identity.user_id:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+
+    user = await repo.get_by_id(identity.user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User account not found.")
+
+    email = str(user.get("email") or "").strip().lower()
+    if not email:
+        raise HTTPException(status_code=400, detail="Account has no email address.")
+
+    in_cooldown, seconds_remaining = check_resend_cooldown(identity.user_id, "2fa_action")
+    if in_cooldown:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Please wait {seconds_remaining} second(s) before requesting a new code.",
+        )
+
+    otp = generate_otp()
+    store_otp(identity.user_id, "2fa_action", email, otp)
+    set_resend_cooldown(identity.user_id, "2fa_action")
+
+    action_display_map = {
+        "enable_2fa": "Enable Two-Factor Authentication",
+        "disable_2fa": "Disable Two-Factor Authentication",
+        "change_password": "Change Password",
+        "delete_account": "Delete Account",
+    }
+    action_name = action_display_map.get(action, "Security Action")
+    username = str(user.get("username") or "User")
+    await send_2fa_action_email(to_email=email, otp=otp, action_name=action_name, username=username)
+
+    logger.info("2FA action OTP dispatched for user_id=%s (action=%s)", identity.user_id, action)
+    return {"success": True, "message": "Verification code dispatched.", "cooldown_seconds": 60}
+
+
+# ── POST /user/2fa/enable ────────────────────────────────────────────────────
+@router.post(
+    "/2fa/enable",
+    response_model=UserRecord,
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_auth_per_minute))],
+)
+async def enable_2fa(
+    body: TwoFactorToggleRequest,
+    identity: Identity = Depends(get_user_identity),
+    repo: UserRepository = Depends(get_repo),
+):
+    """Enable two-factor authentication. Requires email to be verified first, and validates 2fa_action OTP."""
+    logger.debug("Entering enable_2fa: user_id=%s", identity.user_id)
+    if not identity.is_authenticated or not identity.user_id:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+
+    user = await repo.get_by_id(identity.user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User account not found.")
+
+    if not user.get("email_verified_at"):
+        raise HTTPException(
+            status_code=400,
+            detail="Your email address must be verified before enabling two-factor authentication.",
+        )
+
+    email = str(user.get("email") or "").strip().lower()
+    ok, error_msg = verify_otp(identity.user_id, "2fa_action", email, body.otp)
+    if not ok:
+        logger.warning("enable_2fa failed for user_id=%s: %s", identity.user_id, error_msg)
+        raise HTTPException(status_code=400, detail=error_msg)
+
+    success = await repo.update_2fa_status(identity.user_id, True)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to enable two-factor authentication.")
+
+    updated_user = await repo.get_by_id(identity.user_id)
+    logger.info("2FA enabled successfully for user_id=%s", identity.user_id)
+    return updated_user
+
+
+# ── POST /user/2fa/disable ───────────────────────────────────────────────────
+@router.post(
+    "/2fa/disable",
+    response_model=UserRecord,
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_auth_per_minute))],
+)
+async def disable_2fa(
+    body: TwoFactorToggleRequest,
+    identity: Identity = Depends(get_user_identity),
+    repo: UserRepository = Depends(get_repo),
+):
+    """Disable two-factor authentication. Validates 2fa_action OTP."""
+    logger.debug("Entering disable_2fa: user_id=%s", identity.user_id)
+    if not identity.is_authenticated or not identity.user_id:
+        raise HTTPException(status_code=401, detail="Authentication required.")
+
+    user = await repo.get_by_id(identity.user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User account not found.")
+
+    email = str(user.get("email") or "").strip().lower()
+    ok, error_msg = verify_otp(identity.user_id, "2fa_action", email, body.otp)
+    if not ok:
+        logger.warning("disable_2fa failed for user_id=%s: %s", identity.user_id, error_msg)
+        raise HTTPException(status_code=400, detail=error_msg)
+
+    success = await repo.update_2fa_status(identity.user_id, False)
+    if not success:
+        raise HTTPException(status_code=500, detail="Failed to disable two-factor authentication.")
+
+    updated_user = await repo.get_by_id(identity.user_id)
+    logger.info("2FA disabled successfully for user_id=%s", identity.user_id)
     return updated_user
 
 

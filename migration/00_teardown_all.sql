@@ -64,6 +64,7 @@ DROP INDEX IF EXISTS idx_devices_trial_consumed;
 DROP INDEX IF EXISTS idx_users_active_google_id;
 DROP INDEX IF EXISTS idx_users_active_email;
 DROP INDEX IF EXISTS idx_users_active_username;
+DROP INDEX IF EXISTS idx_users_2fa_enabled;
 DROP INDEX IF EXISTS idx_users_mobile;
 DROP INDEX IF EXISTS idx_users_google_id;
 DROP INDEX IF EXISTS idx_users_email;

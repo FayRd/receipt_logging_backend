@@ -68,6 +68,25 @@ def create_refresh_token(user_id: str, username: str, expires_delta: timedelta |
     return encoded_jwt
 
 
+def create_2fa_temp_token(user_id: str, username: str) -> str:
+    """Create a signed ephemeral 2FA challenge JWT valid for 5 minutes."""
+    settings = get_settings()
+    secret = _get_jwt_secret()
+    algorithm = getattr(settings, "jwt_algorithm", "HS256")
+    expire = datetime.now(timezone.utc) + timedelta(minutes=5)
+
+    payload: dict[str, Any] = {
+        "sub": user_id,
+        "username": username,
+        "type": "2fa_challenge",
+        "iat": datetime.now(timezone.utc),
+        "exp": expire,
+    }
+    encoded_jwt = jwt.encode(payload, secret, algorithm=algorithm)
+    logger.debug("Issued JWT 2fa_challenge token for user_id=%s, expires=%s", user_id, expire.isoformat())
+    return encoded_jwt
+
+
 def verify_jwt_token(token: str, expected_type: str = "access") -> dict[str, Any]:
     """Verify and decode a JWT token string, enforcing signature and claims."""
     settings = get_settings()

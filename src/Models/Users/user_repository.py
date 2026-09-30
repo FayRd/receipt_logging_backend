@@ -10,7 +10,7 @@ from src.Models.schemas import UserCreateRequest, UserUpdateRequest
 logger = get_logger("Models.user_repository")
 
 # Columns returned in all sanitized (non-auth) user fetches
-_USER_SAFE_COLUMNS = "id, username, email, google_id, country_code, mobile_number, avatar_image_path, custom_categories, preferences, email_verified_at, mobile_verified_at, tier, created_at, deleted_at"
+_USER_SAFE_COLUMNS = "id, username, email, google_id, country_code, mobile_number, avatar_image_path, custom_categories, preferences, email_verified_at, mobile_verified_at, tier, is_2fa_enabled, created_at, deleted_at"
 
 
 
@@ -538,6 +538,28 @@ class UserRepository:
         except Exception as e:
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.error("Database error in UPDATE user password user_id=%s after %.2fms: %s", user_id, duration_ms, e, exc_info=True)
+            raise
+
+    async def update_2fa_status(self, user_id: str, enabled: bool) -> bool:
+        """Enable or disable Two-Factor Authentication (2FA) for a user."""
+        start_time = time.perf_counter()
+        logger.debug("UPDATE user 2FA status: user_id='%s', enabled=%s", user_id, enabled)
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            res = await (
+                self.db.table(self.TABLE)
+                .update({"is_2fa_enabled": enabled, "updated_at": now_iso})
+                .eq("id", user_id)
+                .is_("deleted_at", "null")
+                .execute()
+            )
+            success = bool(res and res.data and len(res.data) > 0)
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.info("UPDATE user 2FA status finished: user_id=%s, enabled=%s in %.2fms", user_id, enabled, duration_ms)
+            return success
+        except Exception as e:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.error("Database error in UPDATE user 2FA status for user_id=%s after %.2fms: %s", user_id, duration_ms, e, exc_info=True)
             raise
 
     # ── EMAIL VERIFICATION ────────────────────────────────────────────────────

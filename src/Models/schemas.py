@@ -239,6 +239,7 @@ class UserRecord(BaseModel):
     email_verified_at: datetime | None = None
     mobile_verified_at: datetime | None = None
     tier: str = "free"
+    is_2fa_enabled: bool = False
     created_at: datetime
     updated_at: datetime | None = None
     deleted_at: datetime | None = None
@@ -259,7 +260,10 @@ class UserUpdateRequest(BaseModel):
 
 class UserLoginResponse(BaseModel):
     success: bool
-    user: UserRecord
+    requires_2fa: bool = False
+    temp_token: str | None = None
+    masked_email: str | None = None
+    user: UserRecord | None = None
     message: str
     access_token: str | None = None
     refresh_token: str | None = None
@@ -277,6 +281,9 @@ class GoogleAuthRequest(BaseModel):
 class GoogleAuthResponse(BaseModel):
     """Unified response model for Google OAuth login/signup endpoint."""
     success: bool = True
+    requires_2fa: bool = False
+    temp_token: str | None = None
+    masked_email: str | None = None
     needs_username: bool = False
     is_new_user: bool = False
     suggested_username: str | None = None
@@ -288,6 +295,22 @@ class GoogleAuthResponse(BaseModel):
     refresh_token: str | None = None
     token_type: str = "bearer"
     expires_in: int | None = None
+
+
+class Login2FAVerifyRequest(BaseModel):
+    """Request body for verifying 2FA challenge during login."""
+    temp_token: str = Field(..., description="Ephemeral 2FA challenge JWT token.")
+    otp: str = Field(..., min_length=6, max_length=6, description="6-digit numeric OTP code.")
+
+
+class Login2FAResendRequest(BaseModel):
+    """Request body for resending 2FA OTP during login."""
+    temp_token: str = Field(..., description="Ephemeral 2FA challenge JWT token.")
+
+
+class TwoFactorToggleRequest(BaseModel):
+    """Request body for enabling or disabling 2FA."""
+    otp: str = Field(..., min_length=6, max_length=6, description="6-digit numeric OTP code.")
 
 
 class TokenRefreshRequest(BaseModel):

@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS users (
     email_verified_at TIMESTAMPTZ,
     mobile_verified_at TIMESTAMPTZ,
     tier user_tier NOT NULL DEFAULT 'free',
+    is_2fa_enabled BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     deleted_at TIMESTAMPTZ
@@ -35,6 +36,12 @@ BEGIN
         WHERE table_name = 'users' AND column_name = 'google_id'
     ) THEN
         ALTER TABLE users ADD COLUMN google_id TEXT;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'users' AND column_name = 'is_2fa_enabled'
+    ) THEN
+        ALTER TABLE users ADD COLUMN is_2fa_enabled BOOLEAN NOT NULL DEFAULT FALSE;
     END IF;
     ALTER TABLE users ALTER COLUMN password DROP NOT NULL;
 END $$;

@@ -7,6 +7,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_users_active_email ON users (LOWER(email))
 CREATE INDEX IF NOT EXISTS idx_users_email_verified ON users (email_verified_at) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_users_mobile ON users (mobile_number) WHERE deleted_at IS NULL AND mobile_number IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_active_google_id ON users (google_id) WHERE deleted_at IS NULL AND google_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_users_2fa_enabled ON users (id) WHERE is_2fa_enabled IS TRUE;
 CREATE INDEX IF NOT EXISTS idx_devices_hardware ON devices (name) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_devices_user ON devices (user_id) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_devices_trial_consumed ON devices (name) WHERE trial_consumed_at IS NOT NULL;
@@ -18,6 +19,7 @@ CREATE INDEX IF NOT EXISTS idx_conversations_guest_migration ON conversations (d
 CREATE INDEX IF NOT EXISTS idx_chat_messages_conv ON chat_messages (conversation_id, created_at ASC);
 CREATE INDEX IF NOT EXISTS idx_forget_password_user ON forget_password (user_id) WHERE is_used IS FALSE;
 CREATE INDEX IF NOT EXISTS idx_forget_password_token ON forget_password (reset_token_hash) WHERE is_used IS FALSE;
+CREATE INDEX IF NOT EXISTS idx_users_2fa_enabled ON users (id) WHERE is_2fa_enabled IS TRUE;
 
 -- ── 2. TRIGGER FUNCTION: AUTO-UPDATE updated_at COLUMN ──────────────────────
 CREATE OR REPLACE FUNCTION set_updated_at_column()

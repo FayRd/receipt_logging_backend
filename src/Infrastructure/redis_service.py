@@ -100,31 +100,33 @@ def generate_otp() -> str:
 # ── Public API ───────────────────────────────────────────────────────────────
 
 OTP_TTL = 600       # 10 minutes
+OTP_2FA_TTL = 300   # 5 minutes
 COOLDOWN_TTL = 60   # 60 seconds
 MAX_ATTEMPTS = 5
 
 
-def store_otp(user_id: str, target_type: str, identifier: str, otp: str) -> None:
-    """Store a hashed OTP for a user's verification target (e.g. 'email')."""
+def store_otp(user_id: str, target_type: str, identifier: str, otp: str, ttl_seconds: int | None = None) -> None:
+    """Store a hashed OTP for a user's verification target (e.g. 'email', '2fa_login', '2fa_action')."""
     key = f"verify:otp:{user_id}:{target_type}"
     record = {
         "hash": _hash_otp(otp),
         "attempts": 0,
         "identifier": identifier.strip().lower(),
     }
+    actual_ttl = ttl_seconds if ttl_seconds is not None else (OTP_2FA_TTL if target_type.startswith("2fa") else OTP_TTL)
 
     r = _get_redis()
     if r:
         import json
         try:
-            r.setex(key, OTP_TTL, json.dumps(record))
-            logger.debug("OTP stored in Redis: key=%s", key)
+            r.setex(key, actual_ttl, json.dumps(record))
+            logger.debug("OTP stored in Redis: key=%s (ttl=%ds)", key, actual_ttl)
             return
         except Exception as e:
             logger.warning("Redis setex failed, falling back to memory: %s", e)
 
-    _mem_set(key, record, OTP_TTL)
-    logger.debug("OTP stored in memory: key=%s", key)
+    _mem_set(key, record, actual_ttl)
+    logger.debug("OTP stored in memory: key=%s (ttl=%ds)", key, actual_ttl)
 
 
 def verify_otp(user_id: str, target_type: str, identifier: str, input_otp: str) -> tuple[bool, str | None]:
@@ -228,6 +230,18 @@ def delete_otp(user_id: str, target_type: str) -> None:
     key = f"verify:otp:{user_id}:{target_type}"
     r = _get_redis()
     _delete_otp(key, r)
+
+
+def clear_resend_cooldown(user_id: str, target_type: str) -> None:
+    """Clear resend cooldown for testing or reset flows."""
+    key = f"verify:cooldown:{user_id}:{target_type}"
+    r = _get_redis()
+    if r:
+        try:
+            r.delete(key)
+        except Exception:
+            pass
+    _memory_store.pop(key, None)
 
 
 # ── Internal Helpers ─────────────────────────────────────────────────────────

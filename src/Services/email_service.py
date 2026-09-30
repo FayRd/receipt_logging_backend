@@ -430,3 +430,147 @@ async def send_password_reset_cooldown_email(to_email: str, countdown_str: str, 
     except Exception as e:
         logger.error("Unexpected error during cooldown email dispatch to %s: %s", to_email, e, exc_info=True)
         return False
+
+
+# ── TWO-FACTOR AUTHENTICATION (2FA) TEMPLATES ────────────────────────────────
+
+_TWO_FACTOR_HTML_TEMPLATE = """\
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Two-Factor Authentication</title>
+  <style>
+    * {{ box-sizing: border-box; }}
+    body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background-color: #121318; color: #E2E8F0; margin: 0; padding: 16px; }}
+    .container {{ width: 100%; max-width: 440px; margin: 20px auto; background-color: #1E2028;
+                  border: 1.5px solid #00E5A0; border-radius: 16px; overflow: hidden;
+                  box-shadow: 4px 4px 12px #0a0b0e, -4px -4px 12px #222530; }}
+    .header {{ background-color: #1E2028; padding: 28px 24px; text-align: center;
+               border-bottom: 1px solid #282C38; }}
+    .header h1 {{ color: #E2E8F0; margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -0.3px; }}
+    .header p {{ color: #94A3B8; margin: 4px 0 0; font-size: 13px; }}
+    .body {{ padding: 28px 24px; }}
+    .greeting {{ font-size: 15px; color: #E2E8F0; font-weight: 600; margin: 0 0 14px; }}
+    .message {{ font-size: 14px; color: #94A3B8; line-height: 1.6; margin: 0 0 24px; }}
+    .otp-box {{ background-color: #161820; border: 1px solid #282C38; border-radius: 12px;
+                text-align: center; padding: 20px 16px; margin: 0 0 24px;
+                box-shadow: inset 2px 2px 5px #0f1015, inset -2px -2px 5px #242733; }}
+    .otp-box .otp-label {{ font-size: 11px; color: #94A3B8; text-transform: uppercase;
+                            letter-spacing: 1.5px; margin-bottom: 8px; font-weight: 600; }}
+    .otp-box .otp-code {{ font-size: 36px; font-weight: 800; color: #00E5A0;
+                           letter-spacing: 8px; margin: 0; }}
+    .notice {{ background-color: #161820; border-left: 3px solid #00E5A0; border-radius: 6px;
+               padding: 12px 16px; margin-bottom: 24px;
+               box-shadow: inset 1px 1px 3px #0f1015, inset -1px -1px 3px #242733; }}
+    .notice p {{ font-size: 13px; color: #94A3B8; margin: 0; line-height: 1.5; }}
+    .notice strong {{ color: #E2E8F0; }}
+    .footer {{ padding: 18px 24px; border-top: 1px solid #282C38; text-align: center; }}
+    .footer p {{ font-size: 12px; color: #64748B; margin: 0; }}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>SancFund</h1>
+      <p>Two-Factor Authentication</p>
+    </div>
+    <div class="body">
+      <p class="greeting">Hello, {username}!</p>
+      <p class="message">
+        A verification code is required to {action_description}.
+        Use the 6-digit security code below to proceed. This code is valid for <strong style="color: #E2E8F0;">5 minutes</strong>.
+      </p>
+      <div class="otp-box">
+        <div class="otp-label">Security Code</div>
+        <div class="otp-code">{otp}</div>
+      </div>
+      <div class="notice">
+        <p><strong>Security Notice:</strong> Never share this code with anyone.
+           SancFund will never ask for your verification code. If you did not initiate this request,
+           please change your password immediately.</p>
+      </div>
+    </div>
+    <div class="footer">
+      <p>© 2026 SancFund · {from_address}</p>
+      <p style="margin-top: 4px;">This is an automated message — please do not reply.</p>
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+_TWO_FACTOR_TEXT_TEMPLATE = """\
+SancFund — Two-Factor Authentication
+
+Hello, {username}!
+
+A verification code is required to {action_description}.
+Your security code is: {otp}
+
+This code is valid for 5 minutes. Do not share it with anyone.
+
+Security Notice: Never share this code with anyone. SancFund will never ask for your verification code. If you did not initiate this request, please change your password immediately.
+
+— SancFund Team
+"""
+
+
+def _build_2fa_message(to_email: str, otp: str, username: str, action_description: str) -> MIMEMultipart:
+    msg = MIMEMultipart("alternative")
+    msg["Subject"] = "SancFund — Two-Factor Security Code"
+    msg["From"] = f"{_settings.mail_from_name} <{_settings.mail_from_address}>"
+    msg["To"] = to_email
+
+    text_part = MIMEText(
+        _TWO_FACTOR_TEXT_TEMPLATE.format(
+            username=username,
+            otp=otp,
+            action_description=action_description,
+        ),
+        "plain",
+        "utf-8",
+    )
+    html_part = MIMEText(
+        _TWO_FACTOR_HTML_TEMPLATE.format(
+            username=username,
+            otp=otp,
+            action_description=action_description,
+            from_address=_settings.mail_from_address,
+        ),
+        "html",
+        "utf-8",
+    )
+    msg.attach(text_part)
+    msg.attach(html_part)
+    return msg
+
+
+async def send_2fa_login_email(to_email: str, otp: str, username: str = "User") -> bool:
+    """Dispatch a 2FA login verification OTP to the given address via Mailtrap SMTP."""
+    if not _settings.mail_username or not _settings.mail_password:
+        logger.warning("Mailtrap SMTP credentials not configured — skipping 2FA login email dispatch to %s", to_email)
+        return False
+
+    try:
+        msg = _build_2fa_message(to_email, otp, username, "sign in to your account")
+        return await asyncio.to_thread(_send_smtp_sync, msg, to_email)
+    except Exception as e:
+        logger.error("Unexpected error during 2FA login email dispatch to %s: %s", to_email, e, exc_info=True)
+        return False
+
+
+async def send_2fa_action_email(to_email: str, otp: str, action_name: str, username: str = "User") -> bool:
+    """Dispatch a 2FA action verification OTP for sensitive changes via Mailtrap SMTP."""
+    if not _settings.mail_username or not _settings.mail_password:
+        logger.warning("Mailtrap SMTP credentials not configured — skipping 2FA action email dispatch to %s", to_email)
+        return False
+
+    try:
+        msg = _build_2fa_message(to_email, otp, username, f"authorize {action_name}")
+        return await asyncio.to_thread(_send_smtp_sync, msg, to_email)
+    except Exception as e:
+        logger.error("Unexpected error during 2FA action email dispatch to %s: %s", to_email, e, exc_info=True)
+        return False

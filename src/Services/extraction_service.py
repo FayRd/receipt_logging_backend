@@ -3,6 +3,7 @@ import base64
 import json
 import random
 import re
+import time
 import httpx
 from google import genai
 from google.genai import types
@@ -329,12 +330,14 @@ class ExtractionService:
                 image_size,
                 context.content_type,
             )
+            call_start = time.perf_counter()
             try:
                 # Dispatch to the appropriate provider backend
                 if provider == "gemini":
                     text = await self._extract_gemini(context)
                 else:
                     text = await self._extract_openrouter(context)
+                call_duration = time.perf_counter() - call_start
 
                 # Clean markdown wrappers that some models may emit despite prompt instructions
                 text = text.strip()
@@ -367,8 +370,9 @@ class ExtractionService:
                     receipt = Receipt.model_validate(data)
 
                 logger.info(
-                    "Successfully extracted receipt via %s: merchant='%s', total=%.2f, confidence=%.2f, items_count=%d",
+                    "Successfully extracted receipt via %s in %.2fs: merchant='%s', total=%.2f, confidence=%.2f, items_count=%d",
                     provider,
+                    call_duration,
                     receipt.merchant_name,
                     receipt.total_amount or 0.0,
                     receipt.confidence_score or 0.0,

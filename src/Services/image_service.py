@@ -125,6 +125,40 @@ def compress_receipt_image(
     return result
 
 
+def compress_for_ai_scan(
+    image_bytes: bytes,
+    max_dim: int = 1800,
+    quality: int = 80,
+    max_size_bytes: int = 800 * 1024,
+) -> tuple[bytes, bool]:
+    """Verify and compress image for AI OCR extraction.
+
+    Image Compress specs:
+    1. Longest Edge: 1,500 – 1,800 pixels (preserving aspect ratio).
+    2. Format: Progressive JPEG at 80% quality.
+    3. Target File Size: 300 KB – 800 KB.
+
+    Returns (processed_bytes, was_recompressed).
+    Fast-paths if the image already complies with dimension and size limits.
+    """
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            width, height = img.size
+            if max(width, height) <= max_dim and len(image_bytes) <= max_size_bytes:
+                return image_bytes, False
+
+        # Image requires downsizing / recompression
+        norm_img = _open_and_normalize(image_bytes)
+        norm_img.thumbnail((max_dim, max_dim), Image.LANCZOS)
+        result = _encode_jpeg(norm_img, quality=quality)
+        if len(result) > max_size_bytes:
+            result = _encode_jpeg(norm_img, quality=70)
+        return result, True
+    except Exception as e:
+        logger.warning("compress_for_ai_scan failed, passing through raw bytes: %s", e)
+        return image_bytes, False
+
+
 def generate_avatar_resolutions(
     image_bytes: bytes,
     target_max_bytes: int = 5 * 1024 * 1024,

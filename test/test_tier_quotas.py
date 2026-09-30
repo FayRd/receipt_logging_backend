@@ -311,7 +311,7 @@ def test_guest_and_user_quota_isolation(mock_extract, client, mock_device):
     user_q = client.get("/api/v1/user/quota", headers=user_headers)
     assert user_q.status_code == 200
     assert user_q.json()["scan"]["used"] == 0
-    assert user_q.json()["scan"]["remaining"] == 50
+    assert user_q.json()["scan"]["remaining"] == 5
     assert user_q.json()["scan"]["is_exhausted"] is False
 
     # 5. User can scan successfully

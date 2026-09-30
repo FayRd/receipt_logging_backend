@@ -1,6 +1,8 @@
 import hashlib
 import time
 from datetime import datetime, timezone, timedelta
+from fastapi import HTTPException
+from postgrest.exceptions import APIError
 from supabase import AsyncClient
 from src.Infrastructure.logger import get_logger
 from src.Models.schemas import UserCreateRequest, UserUpdateRequest
@@ -10,6 +12,20 @@ logger = get_logger("Models.user_repository")
 # Columns returned in all sanitized (non-auth) user fetches
 _USER_SAFE_COLUMNS = "id, username, email, google_id, country_code, mobile_number, avatar_image_path, custom_categories, preferences, email_verified_at, mobile_verified_at, tier, created_at, deleted_at"
 
+
+
+def _handle_insert_conflict(e: Exception, username: str, conflict_label: str) -> None:
+    """Detect PostgreSQL 23505 unique constraint violation and raise HTTP 409 Conflict."""
+    if isinstance(e, HTTPException):
+        raise e
+    err_code = getattr(e, "code", "") or ""
+    err_msg = getattr(e, "message", "") or str(e)
+    if err_code == "23505" or "23505" in str(e) or "unique constraint" in err_msg.lower():
+        logger.warning(
+            "Duplicate key violation (23505) in user creation for username='%s': %s",
+            username, e,
+        )
+        raise HTTPException(status_code=409, detail=f"An account with this email or {conflict_label} already exists.")
 
 
 class UserRepository:
@@ -214,22 +230,26 @@ class UserRepository:
             if device_id:
                 is_device_reused = await self.check_device_trial_used(device_id)
 
-            now = datetime.now(timezone.utc)
-            if is_device_reused:
-                # Device already consumed a trial
+            email_reused = await self.check_email_trial_or_purchase_used(req.email)
+
+            if is_device_reused or email_reused:
+                # Device or email already consumed a trial or purchase
                 tier = "free"
                 prefs["is_in_trial"] = False
                 prefs["trial_ineligible"] = True
-                logger.info("Device %s already consumed trial. Account '%s' created on Free tier.", device_id, req.username)
+                logger.info(
+                    "Account '%s' ineligible for trial (device_used=%s, email_used=%s). Created on Free tier.",
+                    req.username, is_device_reused, email_reused
+                )
             else:
-                # Automatic 14-day Premium reverse trial
-                tier = "premium"
-                prefs["trial_start_at"] = now.isoformat()
-                prefs["is_in_trial"] = True
+                # Gate 3: Trial deferred pending email verification.
+                # Do NOT mark device consumed yet; keep device eligible if unverified.
+                tier = "free"
+                prefs["is_in_trial"] = False
+                prefs["trial_pending_verification"] = True
                 if device_id:
                     prefs["trial_device_id"] = device_id
-                    await self.mark_device_trial_consumed(device_id)
-                logger.info("Granting 14-day reverse Premium trial to new user '%s'", req.username)
+                logger.info("Account '%s' created on Free tier; trial deferred pending email verification.", req.username)
 
             row = {
                 "username": req.username.strip(),
@@ -249,6 +269,7 @@ class UserRepository:
             logger.info("INSERT user create succeeded: id=%s, tier=%s in %.2fms", user_data.get("id"), user_data.get("tier"), duration_ms)
             return user_data
         except Exception as e:
+            _handle_insert_conflict(e, req.username, "username")
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.error("Database error in INSERT user create username='%s' after %.2fms: %s", req.username, duration_ms, e, exc_info=True)
             raise
@@ -271,13 +292,19 @@ class UserRepository:
             if device_id:
                 is_device_reused = await self.check_device_trial_used(device_id)
 
+            email_reused = await self.check_email_trial_or_purchase_used(email)
+
             now = datetime.now(timezone.utc)
-            if is_device_reused:
+            if is_device_reused or email_reused:
                 tier = "free"
                 prefs["is_in_trial"] = False
                 prefs["trial_ineligible"] = True
-                logger.info("Device %s already consumed trial. Account '%s' created on Free tier.", device_id, username)
+                logger.info(
+                    "Google account '%s' ineligible for trial (device_used=%s, email_used=%s). Created on Free tier.",
+                    username, is_device_reused, email_reused
+                )
             else:
+                # Google email is pre-verified — grant 14-day trial and mark device consumed
                 tier = "premium"
                 prefs["trial_start_at"] = now.isoformat()
                 prefs["is_in_trial"] = True
@@ -306,6 +333,7 @@ class UserRepository:
             logger.info("INSERT google user create succeeded: id=%s, tier=%s in %.2fms", user_data.get("id"), user_data.get("tier"), duration_ms)
             return user_data
         except Exception as e:
+            _handle_insert_conflict(e, username, "Google ID")
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.error("Database error in INSERT google user create username='%s' after %.2fms: %s", username, duration_ms, e, exc_info=True)
             raise
@@ -549,7 +577,7 @@ class UserRepository:
     # ── ECONOMIC MODEL: TRIALS, SUBSCRIPTIONS & AD SCANS ──────────────────────
 
     async def check_device_trial_used(self, device_id: str | None) -> bool:
-        """Check whether a client device has already consumed a reverse trial."""
+        """Check whether a client device has actually consumed a reverse trial."""
         if not device_id or not device_id.strip():
             return False
         clean_device = device_id.strip()
@@ -567,35 +595,59 @@ class UserRepository:
                 logger.info("check_device_trial_used: matched devices.trial_consumed_at for device=%s", clean_device)
                 return True
 
-            # 2. Check users table preferences for trial_device_id across ALL users (including soft-deleted)
+            # 2. Check users table preferences for trial_device_id where trial was actually granted
             res = await (
                 self.db.table(self.TABLE)
-                .select("id")
+                .select("id, tier, preferences")
                 .contains("preferences", {"trial_device_id": clean_device})
-                .limit(1)
                 .execute()
             )
             if res and res.data:
-                logger.info("check_device_trial_used: matched users.preferences.trial_device_id for device=%s", clean_device)
-                return True
-
-            # 3. Check devices table if device was registered and linked to an account
-            res_dev = await (
-                self.db.table("devices")
-                .select("id, user_id")
-                .eq("name", clean_device)
-                .not_.is_("user_id", "null")
-                .is_("deleted_at", "null")
-                .limit(1)
-                .execute()
-            )
-            if res_dev and res_dev.data:
-                logger.info("check_device_trial_used: matched active devices.user_id for device=%s", clean_device)
-                return True
+                for row in res.data:
+                    prefs = row.get("preferences") or {}
+                    tier = (row.get("tier") or "").lower()
+                    if prefs.get("trial_start_at") is not None or prefs.get("is_in_trial") or tier in ("premium", "dev"):
+                        logger.info("check_device_trial_used: matched user with consumed trial for device=%s in user_id=%s", clean_device, row.get("id"))
+                        return True
 
             return False
         except Exception as e:
             logger.warning("Error checking device trial consumption for device=%s: %s", clean_device, e)
+            return False
+
+    async def check_email_trial_or_purchase_used(self, email: str) -> bool:
+        """Check if email has ever been used for a trial or paid tier across all accounts (including soft-deleted)."""
+        if not email or not email.strip():
+            return False
+        clean_email = email.strip().lower()
+        try:
+            res = await (
+                self.db.table(self.TABLE)
+                .select("id, tier, preferences")
+                .eq("email", clean_email)
+                .execute()
+            )
+            if not res or not res.data:
+                return False
+            for row in res.data:
+                tier = (row.get("tier") or "").lower()
+                prefs = row.get("preferences") or {}
+                if tier in ("premium", "dev") or prefs.get("trial_start_at") is not None or prefs.get("is_in_trial"):
+                    logger.info(
+                        "check_email_trial_or_purchase_used: matched previous trial/purchase for email=%s in user_id=%s",
+                        clean_email, row.get("id")
+                    )
+                    return True
+                sub = prefs.get("subscription") or {}
+                if sub.get("is_active"):
+                    logger.info(
+                        "check_email_trial_or_purchase_used: matched active subscription for email=%s in user_id=%s",
+                        clean_email, row.get("id")
+                    )
+                    return True
+            return False
+        except Exception as e:
+            logger.warning("Error checking email trial/purchase history for email=%s: %s", clean_email, e)
             return False
 
     async def mark_device_trial_consumed(self, device_id: str | None) -> None:
@@ -694,6 +746,35 @@ class UserRepository:
         except Exception as e:
             logger.error("Failed to set trial start for user_id=%s: %s", user_id, e, exc_info=True)
             raise
+
+    async def evaluate_and_apply_deferred_trial(self, user_id: str, email: str, user_data: dict) -> dict:
+        """Evaluate trial eligibility upon email verification and either grant reverse trial or mark ineligible."""
+        prefs = user_data.get("preferences") or {}
+        if not prefs.get("trial_pending_verification") or prefs.get("trial_ineligible") or prefs.get("trial_start_at"):
+            return user_data
+
+        device_id = prefs.get("trial_device_id")
+        device_used = await self.check_device_trial_used(device_id) if device_id else False
+        email_used = await self.check_email_trial_or_purchase_used(email)
+
+        if not device_used and not email_used:
+            logger.info("evaluate_and_apply_deferred_trial: Granting 14-day trial for user_id=%s", user_id)
+            updated = await self.set_trial_start(user_id, device_id=device_id)
+            if updated:
+                prefs2 = updated.get("preferences") or {}
+                prefs2.pop("trial_pending_verification", None)
+                prefs2["trial_granted"] = True
+                await self.db.table(self.TABLE).update({"preferences": prefs2, "tier": "premium"}).eq("id", user_id).execute()
+                return await self.get_by_id(user_id) or updated
+            return user_data
+
+        logger.info("evaluate_and_apply_deferred_trial: User %s ineligible (device_used=%s, email_used=%s)", user_id, device_used, email_used)
+        prefs_fail = dict(prefs)
+        prefs_fail["trial_pending_verification"] = False
+        prefs_fail["trial_ineligible"] = True
+        prefs_fail["trial_ineligible_reason"] = "device_or_email_already_used"
+        await self.db.table(self.TABLE).update({"preferences": prefs_fail, "tier": "free"}).eq("id", user_id).execute()
+        return await self.get_by_id(user_id) or user_data
 
     async def set_tier(self, user_id: str, tier: str, updated_preferences: dict | None = None) -> dict | None:
         """Update the user's subscription tier ('free', 'premium', 'dev') and preferences."""

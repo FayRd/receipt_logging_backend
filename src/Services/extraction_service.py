@@ -237,15 +237,14 @@ class ExtractionService:
         system_content = f"{SYSTEM_PROMPT}\n\n{OPENROUTER_JSON_SCHEMA_HINT}"
 
         is_free_tier = getattr(context, "tier", "free") == "free"
-        if is_free_tier:
-            model_name = self.settings.openrouter_vision_model_free
-            if not model_name:
-                raise ValueError("OPENROUTER_VISION_MODEL_FREE must be configured in .env for Free tier OpenRouter vision extraction")
+        model_free = getattr(self.settings, "openrouter_vision_model_free", "")
+        if is_free_tier and isinstance(model_free, str) and model_free:
+            model_name = model_free
         else:
-            model_name = self.settings.openrouter_vision_model
+            cand = getattr(self.settings, "openrouter_vision_model", "google/gemini-2.5-flash")
+            model_name = cand if isinstance(cand, str) and cand else "google/gemini-2.5-flash"
 
         payload = {
-            "model": model_name,
             "model": model_name,
             "response_format": {"type": "json_object"},
             "messages": [

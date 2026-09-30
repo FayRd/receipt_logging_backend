@@ -18,6 +18,7 @@ class Settings(BaseSettings):
 
     # RevenueCat Subscriptions & Entitlements
     revenuecat_webhook_auth_header: str = ""
+    revenuecat_public_api_key: str = ""
 
     # CORS Configuration
     allowed_origins: list[str] = [

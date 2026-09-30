@@ -11,10 +11,10 @@ END $$;
 -- 1. Users Table
 CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    username TEXT UNIQUE NOT NULL,
-    email TEXT UNIQUE NOT NULL,
+    username TEXT NOT NULL,
+    email TEXT NOT NULL,
     password TEXT,
-    google_id TEXT UNIQUE,
+    google_id TEXT,
     country_code TEXT,
     mobile_number TEXT,
     avatar_image_path TEXT,

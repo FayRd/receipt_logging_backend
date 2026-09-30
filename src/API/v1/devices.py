@@ -1,5 +1,8 @@
+from datetime import datetime, timezone
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from supabase import AsyncClient
+from src.config import get_settings
 from src.Infrastructure.database import get_supabase_client
 from src.Auth.identity import Identity, get_device_identity, require_link_bridge_identity
 from src.Auth.rate_limiter import rate_limit
@@ -192,6 +195,39 @@ async def rotate_device_token_endpoint(
     return device
 
 
+async def _check_rc_entitlement(device_name: str, settings) -> bool:
+    """Return True if device_name has an active RC entitlement. Best-effort: returns False on error."""
+    if not settings.revenuecat_public_api_key:
+        return False
+    url = f"https://api.revenuecat.com/v1/subscribers/{device_name}"
+    headers = {
+        "Authorization": f"Bearer {settings.revenuecat_public_api_key}",
+        "Content-Type": "application/json",
+        "X-Platform": "android",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(url, headers=headers)
+            if resp.status_code == 404:
+                return False
+            if resp.status_code != 200:
+                logger.warning("RC entitlement check HTTP %s for device=%s", resp.status_code, device_name)
+                return False
+            data = resp.json()
+            subscriber = data.get("subscriber", {})
+            entitlements = subscriber.get("entitlements", {})
+            now_iso = datetime.now(timezone.utc).isoformat()
+            for ent_id, ent_data in entitlements.items():
+                expires = ent_data.get("expires_date")
+                if expires is None or expires > now_iso:
+                    logger.info("RC active entitlement '%s' found for device=%s", ent_id, device_name)
+                    return True
+            return False
+    except Exception as exc:
+        logger.warning("RC entitlement check failed (fail-open) for device=%s: %s", device_name, exc)
+        return False
+
+
 # ── GET /devices/{device_name}/trial-status ──────────────────────────────────
 @router.get(
     "/{device_name}/trial-status",
@@ -201,17 +237,25 @@ async def get_device_trial_status(
     device_name: str,
     db: AsyncClient = Depends(get_supabase_client),
 ):
-    """Check whether a client hardware device has already consumed a 14-day reverse trial.
+    """Check whether a client hardware device has already consumed a 14-day reverse trial or has active RC entitlement.
 
     Public route for client boot check — helps UI hide trial gift banner after first redemption.
     """
     clean_name = device_name.strip()
+    settings = get_settings()
     user_repo = UserRepository(db)
     trial_used = await user_repo.check_device_trial_used(clean_name)
+
+    rc_entitlement_active = False
+    if not trial_used:
+        rc_entitlement_active = await _check_rc_entitlement(clean_name, settings)
+
+    trial_eligible = not trial_used and not rc_entitlement_active
     return {
         "device_name": clean_name,
         "trial_used": trial_used,
-        "trial_eligible": not trial_used,
+        "rc_entitlement_active": rc_entitlement_active,
+        "trial_eligible": trial_eligible,
     }
 
 

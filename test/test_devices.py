@@ -330,15 +330,24 @@ def test_get_device_trial_status_unclaimed(client):
     assert res2.json() == data1
 
 
-def test_get_device_trial_status_claimed(client):
-    """GET /devices/{device_name}/trial-status returns trial_used=True for a device linked to a trial."""
+def test_get_device_trial_status_claimed(client, monkeypatch):
+    """GET /devices/{device_name}/trial-status returns trial_used=False while unverified, and True once trial is claimed."""
+    from src.Infrastructure import redis_service as rs
+    captured_otp = []
+    original_store = rs.store_otp
+    def mock_store(uid, ttype, ident, otp):
+        captured_otp.append(otp)
+        original_store(uid, ttype, ident, otp)
+    monkeypatch.setattr(rs, "store_otp", mock_store)
+
     device_name = f"DEV-CLAIMED-{uuid.uuid4().hex[:6]}"
     username = f"ut_{uuid.uuid4().hex[:6]}"
     password = "Password123!"
+    email = f"{username}@test.example.com"
 
     res_create = client.post("/api/v1/user/create", json={
         "username": username,
-        "email": f"{username}@test.example.com",
+        "email": email,
         "password": password,
         "preferences": {
             "trial_device_id": device_name,
@@ -347,6 +356,26 @@ def test_get_device_trial_status_claimed(client):
     assert res_create.status_code == 201
 
     try:
+        # Before email verification: no trial consumed yet, device remains eligible (Requirement 3)
+        res_pre = client.get(f"/api/v1/devices/{device_name}/trial-status")
+        assert res_pre.status_code == 200
+        assert res_pre.json()["trial_used"] is False
+        assert res_pre.json()["trial_eligible"] is True
+
+        # User logs in and verifies email
+        login_res = client.post("/api/v1/user/login", json={"username": username, "password": password})
+        assert login_res.status_code == 200
+        token = login_res.json()["access_token"]
+        headers = {"Authorization": f"Bearer {token}"}
+
+        init_res = client.post("/api/v1/user/verify-initiate", json={"type": "email", "identifier": email}, headers=headers)
+        assert init_res.status_code == 200
+        assert len(captured_otp) == 1
+
+        vcomp_res = client.post("/api/v1/user/verify-complete", json={"type": "email", "identifier": email, "otp": captured_otp[0]}, headers=headers)
+        assert vcomp_res.status_code == 200
+
+        # After email verification: trial is consumed and device is now marked trial_used=True
         res1 = client.get(f"/api/v1/devices/{device_name}/trial-status")
         assert res1.status_code == 200
         data1 = res1.json()

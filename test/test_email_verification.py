@@ -258,13 +258,33 @@ def test_verify_complete_success_updates_email(client, monkeypatch):
     assert data["email_verified_at"] is not None
 
 
-def test_verify_initiate_default_tier(client):
-    """Newly created users receive a 14-day reverse trial with tier == 'premium'."""
-    user, _ = _create_and_login(client)
+def test_verify_initiate_default_tier(client, monkeypatch):
+    """Newly created users receive Free tier with trial pending, and unlock 14-day trial upon email verify."""
+    from src.Infrastructure import redis_service as rs
+    captured_otp = []
+    original_store = rs.store_otp
+    def mock_store(uid, ttype, ident, otp):
+        captured_otp.append(otp)
+        original_store(uid, ttype, ident, otp)
+    monkeypatch.setattr(rs, "store_otp", mock_store)
+
+    user, token = _create_and_login(client)
     me_res = client.get(
         "/api/v1/user/me",
         headers={"X-User-Name": user["username"], "X-User-Token": user["password"]},
     )
     assert me_res.status_code == 200
-    assert me_res.json().get("tier") == "premium"
+    assert me_res.json().get("tier") == "free"
+    assert me_res.json().get("preferences", {}).get("trial_pending_verification") is True
+
+    # Complete email verification -> 14-day reverse trial granted
+    headers = {"Authorization": f"Bearer {token}"}
+    init_res = client.post("/api/v1/user/verify-initiate", json={"type": "email", "identifier": user["email"]}, headers=headers)
+    assert init_res.status_code == 200
+    assert len(captured_otp) == 1
+
+    vcomp = client.post("/api/v1/user/verify-complete", json={"type": "email", "identifier": user["email"], "otp": captured_otp[0]}, headers=headers)
+    assert vcomp.status_code == 200
+    assert vcomp.json().get("tier") == "premium"
+    assert vcomp.json().get("preferences", {}).get("is_in_trial") is True
 

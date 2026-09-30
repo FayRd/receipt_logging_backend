@@ -2,11 +2,11 @@
 -- Idempotent performance indexes, trigger functions, and RPC helper functions
 
 -- ── 1. PERFORMANCE INDEXES ───────────────────────────────────────────────────
-CREATE INDEX IF NOT EXISTS idx_users_username ON users (LOWER(username)) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_users_email ON users (LOWER(email)) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_active_username ON users (LOWER(username)) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_active_email ON users (LOWER(email)) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_users_email_verified ON users (email_verified_at) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_users_mobile ON users (mobile_number) WHERE deleted_at IS NULL AND mobile_number IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_users_google_id ON users (google_id) WHERE deleted_at IS NULL AND google_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_active_google_id ON users (google_id) WHERE deleted_at IS NULL AND google_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_devices_hardware ON devices (name) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_devices_user ON devices (user_id) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_devices_trial_consumed ON devices (name) WHERE trial_consumed_at IS NOT NULL;

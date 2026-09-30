@@ -1212,6 +1212,9 @@ async def verify_complete(
         logger.error("verify_complete: set_email_verified returned no data for user_id=%s", identity.user_id)
         raise HTTPException(status_code=500, detail="Failed to update email verification status.")
 
+    # Re-evaluate trial eligibility if trial was pending verification
+    updated_user = await repo.evaluate_and_apply_deferred_trial(identity.user_id, identifier, updated_user)
+
     logger.info("verify_complete: email verified for user_id=%s, email=%s", identity.user_id, identifier)
     return updated_user
 

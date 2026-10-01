@@ -43,18 +43,199 @@ async def get_extraction_service() -> ExtractionService:
 
 # ── BATCH BACKGROUND WORKER ──────────────────────────────────────────
 
+def _extract_job_item(item: tuple) -> tuple[str, str, bytes, str, float]:
+    """Extracts job tuple elements, ensuring received_at timestamp is present."""
+    if len(item) >= 5:
+        return item[0], item[1], item[2], item[3], item[4]
+    return item[0], item[1], item[2], item[3], time.time()
+
+
+async def _record_job_failure(
+    job_key: str,
+    error_msg: str,
+    queue_dur: float,
+    prep_dur: float,
+    total_dur: float,
+    ai_dur: float = 0.0,
+) -> None:
+    """Helper to record failed job state and latency metrics in Redis."""
+    mapping = {
+        "status": "FAILED",
+        "error": error_msg,
+        "queue_duration_sec": f"{queue_dur:.3f}",
+        "preprocess_duration_sec": f"{prep_dur:.3f}",
+        "total_duration_sec": f"{total_dur:.3f}",
+    }
+    if ai_dur > 0.0:
+        mapping["ai_duration_sec"] = f"{ai_dur:.3f}"
+    await redis_client.hset(job_key, mapping=mapping)
+
+
+async def _handle_provider_overload(
+    batch_id: str,
+    job_id: str,
+    index: int,
+    job_items: list[tuple],
+    batch_meta_key: str,
+    halt_event: asyncio.Event,
+    queue_dur: float,
+    prep_dur: float,
+    total_dur: float,
+) -> None:
+    """Handles an upstream 429/500 provider overload by halting unstarted queue jobs."""
+    halt_event.set()
+    error_msg = FRIENDLY_ERROR_MESSAGE
+    await _record_job_failure(f"job:{job_id}", error_msg, queue_dur, prep_dur, total_dur)
+
+    any_completed = False
+    for prev_item in job_items:
+        prev_status = await redis_client.hget(f"job:{prev_item[0]}", "status")
+        if prev_status == "COMPLETED":
+            any_completed = True
+            break
+
+    meta_flag = "halted_on_provider_error" if any_completed else "halted_on_first_job"
+    logger.warning("Job %s failed with provider overload error. Halting remaining jobs in batch %s.", job_id, batch_id)
+    await redis_client.hset(batch_meta_key, meta_flag, "true")
+
+    for rem_item in job_items:
+        rem_job_id = rem_item[0]
+        if rem_job_id != job_id:
+            rem_status = await redis_client.hget(f"job:{rem_job_id}", "status")
+            if rem_status not in ("COMPLETED", "PROCESSING"):
+                await redis_client.hset(
+                    f"job:{rem_job_id}",
+                    mapping={"error": error_msg, "status": "FAILED"},
+                )
+
+
+async def _process_single_job(
+    item: tuple,
+    index: int,
+    total_jobs: int,
+    batch_id: str,
+    tier: str,
+    service: ExtractionService,
+    settings,
+    batch_meta_key: str,
+    halt_event: asyncio.Event,
+    job_items: list[tuple],
+) -> bool:
+    """Processes a single receipt job from a batch.
+
+    Handles redis state updates, image compression, AI extraction, and graceful failure handling.
+    Returns True if job completed successfully, False otherwise.
+    """
+    job_id, filename, image_bytes, content_type, received_at = _extract_job_item(item)
+    job_key = f"job:{job_id}"
+    queue_duration = max(0.0, time.time() - received_at)
+
+    if halt_event.is_set():
+        await _record_job_failure(job_key, FRIENDLY_ERROR_MESSAGE, queue_duration, 0.0, queue_duration)
+        return False
+
+    batch_status = await redis_client.hget(batch_meta_key, "status")
+    if batch_status == "CANCELLED":
+        logger.info("Batch %s cancelled. Job %s cancelled.", batch_id, job_id)
+        await _record_job_failure(job_key, "Batch processing timed out", queue_duration, 0.0, queue_duration)
+        return False
+
+    logger.info(
+        "Worker processing started for job %s (index %d/%d, batch %s, file=%s, tier=%s, queue_time=%.2fs)",
+        job_id,
+        index + 1,
+        total_jobs,
+        batch_id,
+        filename,
+        tier,
+        queue_duration,
+    )
+    await redis_client.hset(job_key, "status", "PROCESSING")
+
+    prep_start = time.perf_counter()
+    raw_size_bytes = len(image_bytes)
+    processed_bytes, was_recompressed = compress_for_ai_scan(image_bytes)
+    preprocess_duration = time.perf_counter() - prep_start
+    final_size_bytes = len(processed_bytes)
+
+    try:
+        context = ScanContext(
+            image_bytes=processed_bytes,
+            content_type="image/jpeg" if was_recompressed else content_type,
+            user_id=None,
+            device_id=None,
+            tier=tier,
+        )
+        ai_start = time.perf_counter()
+        receipt: Receipt = await service.extract_from_image(context)
+        ai_duration = time.perf_counter() - ai_start
+        total_duration = time.time() - received_at
+
+        confidence = receipt.confidence_score if receipt.confidence_score is not None else 0.0
+        if confidence < settings.confidence_threshold:
+            error_msg = receipt.notes or (
+                f"Invalid document type. The uploaded image does not appear to be a valid receipt or "
+                f"financial statement (confidence score {confidence:.2f} is below the {settings.confidence_threshold} threshold)."
+            )
+            logger.warning("Worker job %s confidence score %.2f is below threshold: %s", job_id, confidence, error_msg)
+            await _record_job_failure(job_key, error_msg, queue_duration, preprocess_duration, total_duration, ai_duration)
+            return False
+
+        await redis_client.hset(
+            job_key,
+            mapping={
+                "result": receipt.model_dump_json(),
+                "status": "COMPLETED",
+                "queue_duration_sec": f"{queue_duration:.3f}",
+                "preprocess_duration_sec": f"{preprocess_duration:.3f}",
+                "ai_duration_sec": f"{ai_duration:.3f}",
+                "total_duration_sec": f"{total_duration:.3f}",
+            },
+        )
+
+        provider = settings.effective_ai_provider
+        model_name = (
+            settings.gemini_vision_model_free if tier == "free" and getattr(settings, "gemini_vision_model_free", "") else settings.gemini_vision_model
+            if provider == "gemini"
+            else (settings.openrouter_vision_model_free if tier == "free" and getattr(settings, "openrouter_vision_model_free", "") else settings.openrouter_vision_model)
+        )
+        logger.debug(
+            "[ScanLatency] Job %s (%s): Total=%.2fs | Queue=%.2fs | Preprocess=%.2fs%s | AI (%s:%s)=%.2fs | Size=%dKB -> %dKB",
+            job_id,
+            filename,
+            total_duration,
+            queue_duration,
+            preprocess_duration,
+            " (recompressed)" if was_recompressed else " (fast-path)",
+            provider,
+            model_name,
+            ai_duration,
+            raw_size_bytes // 1024,
+            final_size_bytes // 1024,
+        )
+        logger.info("Worker job %s COMPLETED successfully in batch %s (total=%.2fs)", job_id, batch_id, total_duration)
+        return True
+
+    except Exception as e:
+        total_duration = time.time() - received_at
+        logger.error("Error processing receipt job %s in batch %s (elapsed=%.2fs): %s", job_id, batch_id, total_duration, e, exc_info=True)
+        if is_provider_overload_error(e):
+            await _handle_provider_overload(batch_id, job_id, index, job_items, batch_meta_key, halt_event, queue_duration, preprocess_duration, total_duration)
+        else:
+            await _record_job_failure(job_key, str(e), queue_duration, preprocess_duration, total_duration)
+        return False
+
+
 async def process_batch_worker(
     batch_id: str,
     job_items: list[tuple],  # [(job_id, filename, image_bytes, content_type[, received_at])]
     tier: str = "free",
 ) -> None:
-    """Background worker that processes a batch of receipt jobs sequentially.
+    """Background worker that processes a batch of receipt jobs.
 
-    If the first job or any job encounters an unrecoverable 429/500/provider error:
-    - Marks current job FAILED with friendly error.
-    - Immediately halts remaining pending jobs and marks them FAILED with friendly error.
-    - If it's the first job (index 0), records 'halted_on_first_job' in batch metadata.
-    - If it's a subsequent job (index > 0), earlier completed jobs are preserved.
+    - Free tier: Sequential execution (concurrency = 1).
+    - Premium / Dev tier: Parallel execution bounded by min(len(job_items), 4) workers.
+    - Upstream AI 429/overload halts further queue execution while preserving in-flight completions.
     """
     if not redis_client:
         logger.error("Redis client not initialized for batch worker task %s", batch_id)
@@ -63,180 +244,69 @@ async def process_batch_worker(
     service = ExtractionService()
     settings = get_settings()
     batch_meta_key = f"batch:{batch_id}:meta"
+    halt_event = asyncio.Event()
 
-    for index, item in enumerate(job_items):
-        if len(item) >= 5:
-            job_id, filename, image_bytes, content_type, received_at = item[:5]
-        else:
-            job_id, filename, image_bytes, content_type = item[:4]
-            received_at = time.time()
+    is_parallel = tier in ("premium", "dev") and len(job_items) > 1
 
-        job_key = f"job:{job_id}"
-        worker_start_time = time.time()
-        queue_duration = max(0.0, worker_start_time - received_at)
-
-        # Check if the batch has been cancelled before processing next item
-        batch_status = await redis_client.hget(batch_meta_key, "status")
-        if batch_status == "CANCELLED":
-            logger.info("Batch %s cancelled. Halting remaining jobs.", batch_id)
-            for rem_item in job_items[index:]:
-                rem_job_id = rem_item[0]
-                await redis_client.hset(
-                    f"job:{rem_job_id}",
-                    mapping={
-                        "status": "FAILED",
-                        "error": "Batch processing timed out",
-                    },
-                )
-            break
-
-        # Step 1: Set status to PROCESSING
-        logger.info(
-            "Worker processing started for job %s (index %d/%d, batch %s, file=%s, tier=%s, queue_time=%.2fs)",
-            job_id,
-            index + 1,
-            len(job_items),
-            batch_id,
-            filename,
-            tier,
-            queue_duration,
-        )
-        await redis_client.hset(job_key, "status", "PROCESSING")
-
-        # Step 2: Server-side safeguard compression (1,500-1,800px max edge, JPEG 80%, <= 800KB)
-        prep_start = time.perf_counter()
-        raw_size_bytes = len(image_bytes)
-        processed_bytes, was_recompressed = compress_for_ai_scan(image_bytes)
-        preprocess_duration = time.perf_counter() - prep_start
-        final_size_bytes = len(processed_bytes)
-
-        try:
-            context = ScanContext(
-                image_bytes=processed_bytes,
-                content_type="image/jpeg" if was_recompressed else content_type,
-                user_id=None,
-                device_id=None,
+    if not is_parallel:
+        # Sequential processing for free tier or single-job batches
+        for index, item in enumerate(job_items):
+            if halt_event.is_set():
+                break
+            await _process_single_job(
+                item=item,
+                index=index,
+                total_jobs=len(job_items),
+                batch_id=batch_id,
                 tier=tier,
+                service=service,
+                settings=settings,
+                batch_meta_key=batch_meta_key,
+                halt_event=halt_event,
+                job_items=job_items,
             )
-            ai_start = time.perf_counter()
-            receipt: Receipt = await service.extract_from_image(context)
-            ai_duration = time.perf_counter() - ai_start
-            total_duration = time.time() - received_at
+    else:
+        # Parallel processing bounded by min(N, 4) for premium / dev tier
+        max_concurrency = min(len(job_items), 4)
+        sem = asyncio.Semaphore(max_concurrency)
 
-            # Enforce document validation threshold (must be >= confidence_threshold)
-            confidence = receipt.confidence_score if receipt.confidence_score is not None else 0.0
-            if confidence < settings.confidence_threshold:
-                error_msg = receipt.notes or (
-                    f"Invalid document type. The uploaded image does not appear to be a valid receipt or "
-                    f"financial statement (confidence score {confidence:.2f} is below the {settings.confidence_threshold} threshold)."
-                )
-                logger.warning(
-                    "Worker job %s confidence score %.2f is below threshold %.2f (filename=%s): %s",
-                    job_id,
-                    confidence,
-                    settings.confidence_threshold,
-                    filename,
-                    error_msg,
-                )
+        async def worker(index: int, item: tuple):
+            if halt_event.is_set():
+                job_id = item[0]
                 await redis_client.hset(
-                    job_key,
+                    f"job:{job_id}",
                     mapping={
+                        "error": FRIENDLY_ERROR_MESSAGE,
                         "status": "FAILED",
-                        "error": error_msg,
-                        "queue_duration_sec": f"{queue_duration:.3f}",
-                        "preprocess_duration_sec": f"{preprocess_duration:.3f}",
-                        "ai_duration_sec": f"{ai_duration:.3f}",
-                        "total_duration_sec": f"{total_duration:.3f}",
                     },
                 )
-                # Continue processing remaining jobs in batch
-                continue
+                return
 
-            result_text = receipt.model_dump_json()
-
-            await redis_client.hset(
-                job_key,
-                mapping={
-                    "result": result_text,
-                    "status": "COMPLETED",
-                    "queue_duration_sec": f"{queue_duration:.3f}",
-                    "preprocess_duration_sec": f"{preprocess_duration:.3f}",
-                    "ai_duration_sec": f"{ai_duration:.3f}",
-                    "total_duration_sec": f"{total_duration:.3f}",
-                },
-            )
-
-            provider = settings.effective_ai_provider
-            model_name = (
-                settings.gemini_vision_model_free if tier == "free" and getattr(settings, "gemini_vision_model_free", "") else settings.gemini_vision_model
-                if provider == "gemini"
-                else (settings.openrouter_vision_model_free if tier == "free" and getattr(settings, "openrouter_vision_model_free", "") else settings.openrouter_vision_model)
-            )
-            logger.debug(
-                "[ScanLatency] Job %s (%s): Total=%.2fs | Queue=%.2fs | Preprocess=%.2fs%s | AI (%s:%s)=%.2fs | Size=%dKB -> %dKB",
-                job_id,
-                filename,
-                total_duration,
-                queue_duration,
-                preprocess_duration,
-                " (recompressed)" if was_recompressed else " (fast-path)",
-                provider,
-                model_name,
-                ai_duration,
-                raw_size_bytes // 1024,
-                final_size_bytes // 1024,
-            )
-            logger.info("Worker job %s COMPLETED successfully in batch %s (total=%.2fs)", job_id, batch_id, total_duration)
-
-        except Exception as e:
-            total_duration = time.time() - received_at
-            logger.error("Error processing receipt job %s in batch %s (elapsed=%.2fs): %s", job_id, batch_id, total_duration, e, exc_info=True)
-            is_overload = is_provider_overload_error(e)
-
-            if is_overload:
-                error_msg = FRIENDLY_ERROR_MESSAGE
-                await redis_client.hset(
-                    job_key,
-                    mapping={
-                        "error": error_msg,
-                        "status": "FAILED",
-                        "queue_duration_sec": f"{queue_duration:.3f}",
-                        "preprocess_duration_sec": f"{preprocess_duration:.3f}",
-                        "total_duration_sec": f"{total_duration:.3f}",
-                    },
-                )
-                # If first job failed with provider overload error
-                if index == 0:
-                    logger.warning("First job %s failed with provider overload error. Halting entire batch %s.", job_id, batch_id)
-                    await redis_client.hset(batch_meta_key, "halted_on_first_job", "true")
-                else:
-                    logger.warning("Job %s (index %d) failed with provider overload error. Halting remaining jobs in batch %s.", job_id, index, batch_id)
-                    await redis_client.hset(batch_meta_key, "halted_on_provider_error", "true")
-
-                # Mark all subsequent pending jobs in the batch as FAILED with friendly error
-                for rem_item in job_items[index + 1:]:
-                    rem_job_id = rem_item[0]
+            async with sem:
+                if halt_event.is_set():
+                    job_id = item[0]
                     await redis_client.hset(
-                        f"job:{rem_job_id}",
+                        f"job:{job_id}",
                         mapping={
-                            "error": error_msg,
+                            "error": FRIENDLY_ERROR_MESSAGE,
                             "status": "FAILED",
                         },
                     )
-                # Halt batch processing immediately
-                break
-            else:
-                # Non-overload error (e.g. invalid document or corrupted image): mark only this job FAILED
-                await redis_client.hset(
-                    job_key,
-                    mapping={
-                        "error": str(e),
-                        "status": "FAILED",
-                        "queue_duration_sec": f"{queue_duration:.3f}",
-                        "preprocess_duration_sec": f"{preprocess_duration:.3f}",
-                        "total_duration_sec": f"{total_duration:.3f}",
-                    },
+                    return
+                await _process_single_job(
+                    item=item,
+                    index=index,
+                    total_jobs=len(job_items),
+                    batch_id=batch_id,
+                    tier=tier,
+                    service=service,
+                    settings=settings,
+                    batch_meta_key=batch_meta_key,
+                    halt_event=halt_event,
+                    job_items=job_items,
                 )
+
+        await asyncio.gather(*(worker(i, it) for i, it in enumerate(job_items)))
 
 
 # ── SINGLE PARSE ENDPOINT (DEPRECATED) ─────────────────────────────────
@@ -351,6 +421,44 @@ async def parse_receipt(
 
 # ── BULK / ASYNC PARSE ENDPOINTS ────────────────────────────────────────
 
+def _validate_batch_file_count(count: int, tier: str | None = None) -> None:
+    """Enforces min/max file count bounds and tier batch limit (OWASP A01 & A04)."""
+    if count < 1 or count > 10:
+        logger.warning("Bulk receipt parsing invalid file count: %d (must be 1-10)", count)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Bulk receipt parsing requires between 1 and 10 image files. Received {count} files.",
+        )
+    if tier:
+        max_files = 10 if tier in ("premium", "dev") else 5
+        if count > max_files:
+            logger.warning("Bulk receipt parsing file count %d exceeds %s tier limit of %d", count, tier, max_files)
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Bulk receipt parsing for {tier} tier allows a maximum of {max_files} files. Received {count} files.",
+            )
+
+
+async def _read_and_validate_file_payloads(files: list[UploadFile], settings) -> list[tuple[bytes, str]]:
+    """Reads image bytes and validates per-file size limits."""
+    file_payloads: list[tuple[bytes, str]] = []
+    for file in files:
+        image_bytes = await file.read()
+        if len(image_bytes) > settings.max_image_size_bytes:
+            logger.warning(
+                "File '%s' size %d exceeds max allowed size %d",
+                file.filename,
+                len(image_bytes),
+                settings.max_image_size_bytes,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"File '{file.filename}' exceeds maximum allowed size of {settings.max_image_size_bytes // (1024 * 1024)}MB.",
+            )
+        file_payloads.append((image_bytes, file.content_type or "image/jpeg"))
+    return file_payloads
+
+
 @router.post(
     "/parse-many",
     response_model=BulkJobCreateResponse,
@@ -408,13 +516,7 @@ async def parse_many_receipts(
             detail="Redis service unavailable. Please check Redis connection.",
         )
 
-    # Enforce file count bounds: min 1, max 10
-    if len(files) < 1 or len(files) > 10:
-        logger.warning("Bulk receipt parsing invalid file count: %d (must be 1-10)", len(files))
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Bulk receipt parsing requires between 1 and 10 image files. Received {len(files)} files.",
-        )
+    _validate_batch_file_count(len(files))
 
     # Enforce daily scan quota
     user_repo = UserRepository(db)
@@ -434,23 +536,13 @@ async def parse_many_receipts(
             headers={"Retry-After": str(q_status["seconds_to_reset"])},
         )
 
+    # Enforce tier-based batch size limit (OWASP A01: Broken Access Control)
+    tier = q_status.get("tier", "free")
+    _validate_batch_file_count(len(files), tier=tier)
+
     # Enforce image size ceiling per file
     settings = get_settings()
-    file_payloads: list[tuple[bytes, str]] = []
-    for file in files:
-        image_bytes = await file.read()
-        if len(image_bytes) > settings.max_image_size_bytes:
-            logger.warning(
-                "File '%s' size %d exceeds max allowed size %d",
-                file.filename,
-                len(image_bytes),
-                settings.max_image_size_bytes,
-            )
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"File '{file.filename}' exceeds maximum allowed size of {settings.max_image_size_bytes // (1024 * 1024)}MB.",
-            )
-        file_payloads.append((image_bytes, file.content_type or "image/jpeg"))
+    file_payloads = await _read_and_validate_file_payloads(files, settings)
 
     t_received = time.time()
     batch_id = str(uuid.uuid4())

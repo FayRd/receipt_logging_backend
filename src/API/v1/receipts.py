@@ -15,7 +15,9 @@ from src.Models.schemas import (
     ReceiptUpdateRequest,
 )
 from src.Models.Receipts.receipt_repository import ReceiptRepository
+from src.Models.Users.user_repository import UserRepository
 from src.Services.image_service import ImageStorageService, validate_image_size
+from src.Services.quota_service import QuotaService
 from src.config import get_settings
 
 router = APIRouter(prefix="/receipts", tags=["Receipts"])
@@ -38,8 +40,44 @@ async def get_repo(db: AsyncClient = Depends(get_supabase_client)) -> ReceiptRep
     return ReceiptRepository(db)
 
 
+async def get_user_repo(db: AsyncClient = Depends(get_supabase_client)) -> UserRepository:
+    return UserRepository(db)
+
+
+async def get_quota_service() -> QuotaService:
+    return QuotaService()
+
+
 async def get_image_storage(db: AsyncClient = Depends(get_supabase_client)) -> ImageStorageService:
     return ImageStorageService(db, bucket=_settings.supabase_user_data_bucket)
+
+
+def _apply_receipt_record_tier_gate(record: dict | None, tier: str) -> dict | None:
+    """Filter out premium-only fields from a ReceiptRecord dict if caller is free tier.
+
+    When tier is 'free', line_items, subtotal, and tax_amount are set to None.
+    When tier is 'premium' or 'dev', the full record is returned intact.
+    Full extraction remains safely encrypted in Supabase storage at all times.
+    """
+    if record is None or tier != "free" or not isinstance(record, dict):
+        return record
+
+    rec_data = record.get("receipt")
+    if isinstance(rec_data, dict):
+        gated_rec = dict(rec_data)
+        gated_rec["line_items"] = None
+        gated_rec["subtotal"] = None
+        gated_rec["tax_amount"] = None
+        record = dict(record)
+        record["receipt"] = gated_rec
+    elif hasattr(rec_data, "model_copy"):
+        record = dict(record)
+        record["receipt"] = rec_data.model_copy(update={
+            "line_items": None,
+            "subtotal": None,
+            "tax_amount": None,
+        })
+    return record
 
 
 # ── GET all receipts for calling identity ────────────────────────────────────
@@ -54,6 +92,8 @@ async def list_receipts(
     offset: int | None = None,
     identity: Identity = Depends(get_user_identity),
     repo: ReceiptRepository = Depends(get_repo),
+    user_repo: UserRepository = Depends(get_user_repo),
+    quota_service: QuotaService = Depends(get_quota_service),
 ):
     """Get all non-deleted receipts owned by the caller's authenticated user identity.
 
@@ -77,8 +117,9 @@ async def list_receipts(
         limit=limit,
         offset=offset,
     )
-    logger.info("list_receipts fetched %d records for user_id=%s", len(records), identity.user_id)
-    return records
+    tier = await quota_service.get_identity_tier(identity, user_repo)
+    logger.info("list_receipts fetched %d records for user_id=%s (tier=%s)", len(records), identity.user_id, tier)
+    return [_apply_receipt_record_tier_gate(r, tier) for r in records]
 
 
 # ── GET single receipt ────────────────────────────────────────────────────────
@@ -91,6 +132,8 @@ async def get_receipt(
     receipt_id: str,
     identity: Identity = Depends(get_user_identity),
     repo: ReceiptRepository = Depends(get_repo),
+    user_repo: UserRepository = Depends(get_user_repo),
+    quota_service: QuotaService = Depends(get_quota_service),
 ):
     """Get a single receipt by ID. Requires X-User-Name and X-User-Token headers."""
     logger.debug("Entering get_receipt: receipt_id=%s, identity (user_id=%s)", receipt_id, identity.user_id)
@@ -98,8 +141,9 @@ async def get_receipt(
     if not data:
         logger.warning("Receipt not found: receipt_id=%s, user_id=%s", receipt_id, identity.user_id)
         raise HTTPException(status_code=404, detail="Receipt not found")
-    logger.info("get_receipt successful: receipt_id=%s, user_id=%s", receipt_id, identity.user_id)
-    return data
+    tier = await quota_service.get_identity_tier(identity, user_repo)
+    logger.info("get_receipt successful: receipt_id=%s, user_id=%s (tier=%s)", receipt_id, identity.user_id, tier)
+    return _apply_receipt_record_tier_gate(data, tier)
 
 
 # ── GET receipt image ─────────────────────────────────────────────────────────
@@ -182,6 +226,8 @@ async def create_receipt(
     identity: Identity = Depends(get_user_identity),
     repo: ReceiptRepository = Depends(get_repo),
     image_storage: ImageStorageService = Depends(get_image_storage),
+    user_repo: UserRepository = Depends(get_user_repo),
+    quota_service: QuotaService = Depends(get_quota_service),
 ):
     """Create a single receipt bound to the caller's authenticated user identity.
 
@@ -275,13 +321,15 @@ async def create_receipt(
         receipt_image_path=receipt_image_path,
         receipt_id=receipt_id,
     )
+    tier = await quota_service.get_identity_tier(identity, user_repo)
     logger.info(
-        "Receipt created successfully: receipt_id=%s, merchant=%s, user_id=%s",
+        "Receipt created successfully: receipt_id=%s, merchant=%s, user_id=%s (tier=%s)",
         record.get("id"),
         receipt.merchant_name,
         identity.user_id,
+        tier,
     )
-    return record
+    return _apply_receipt_record_tier_gate(record, tier)
 
 
 # ── CREATE batch receipts ─────────────────────────────────────────────────────
@@ -335,6 +383,8 @@ async def create_receipts_batch(
     identity: Identity = Depends(get_user_identity),
     repo: ReceiptRepository = Depends(get_repo),
     image_storage: ImageStorageService = Depends(get_image_storage),
+    user_repo: UserRepository = Depends(get_user_repo),
+    quota_service: QuotaService = Depends(get_quota_service),
 ):
     """Batch-create up to 100 receipts bound to the caller's authenticated user identity.
 
@@ -450,12 +500,14 @@ async def create_receipts_batch(
         receipt_image_paths=receipt_image_paths,
         receipt_ids=receipt_ids,
     )
+    tier = await quota_service.get_identity_tier(identity, user_repo)
     logger.info(
-        "Batch receipts created successfully: created_count=%d, user_id=%s",
+        "Batch receipts created successfully: created_count=%d, user_id=%s (tier=%s)",
         len(records),
         identity.user_id,
+        tier,
     )
-    return records
+    return [_apply_receipt_record_tier_gate(r, tier) for r in records]
 
 
 # ── UPDATE receipt ────────────────────────────────────────────────────────────
@@ -498,6 +550,8 @@ async def update_receipt(
     identity: Identity = Depends(get_user_identity),
     repo: ReceiptRepository = Depends(get_repo),
     image_storage: ImageStorageService = Depends(get_image_storage),
+    user_repo: UserRepository = Depends(get_user_repo),
+    quota_service: QuotaService = Depends(get_quota_service),
 ):
     """Update a receipt owned by the caller's authenticated user identity.
 
@@ -592,12 +646,14 @@ async def update_receipt(
             identity.user_id,
         )
         raise HTTPException(status_code=404, detail="Receipt not found or access denied")
+    tier = await quota_service.get_identity_tier(identity, user_repo)
     logger.info(
-        "Receipt updated successfully: receipt_id=%s, user_id=%s",
+        "Receipt updated successfully: receipt_id=%s, user_id=%s (tier=%s)",
         receipt_id,
         identity.user_id,
+        tier,
     )
-    return updated
+    return _apply_receipt_record_tier_gate(updated, tier)
 
 
 # ── SOFT DELETE receipt ───────────────────────────────────────────────────────

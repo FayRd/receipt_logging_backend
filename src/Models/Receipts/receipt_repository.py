@@ -254,6 +254,23 @@ class ReceiptRepository:
 
     # ── UPDATE ────────────────────────────────────────────────────────────────
 
+    async def _preserve_existing_fields(self, receipt_id: str, identity: Identity, receipt: Receipt) -> None:
+        """Preserve existing stored line_items, subtotal, and tax_amount if incoming are missing."""
+        existing = await self.get_by_id(receipt_id, identity)
+        if not existing or "receipt" not in existing or not isinstance(existing["receipt"], dict):
+            return
+        existing_rec = existing["receipt"]
+        if not receipt.line_items and existing_rec.get("line_items"):
+            from src.Models.schemas import LineItem
+            receipt.line_items = [
+                LineItem(**li) if isinstance(li, dict) else li
+                for li in existing_rec["line_items"]
+            ]
+        if receipt.subtotal is None and existing_rec.get("subtotal") is not None:
+            receipt.subtotal = existing_rec.get("subtotal")
+        if receipt.tax_amount is None and existing_rec.get("tax_amount") is not None:
+            receipt.tax_amount = existing_rec.get("tax_amount")
+
     async def update(
         self,
         receipt_id: str,
@@ -277,6 +294,7 @@ class ReceiptRepository:
             now = datetime.now(timezone.utc).isoformat()
             updates: dict = {"updated_at": now}
             if receipt is not None:
+                await self._preserve_existing_fields(receipt_id, identity, receipt)
                 updates["receipt"] = self.crypto.encrypt_json(receipt.model_dump(mode="json"))
                 logger.debug("UPDATE receipt: updating receipt JSON for receipt_id=%s", receipt_id)
             if receipt_image_path is not None:

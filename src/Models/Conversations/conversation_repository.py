@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from supabase import AsyncClient
 from src.Infrastructure.logger import get_logger
 from src.Infrastructure.crypto import get_crypto_engine
+from src.Infrastructure.key_vault import get_key_vault
 from src.Auth.identity import Identity
 
 logger = get_logger("Models.conversation_repository")
@@ -16,6 +17,7 @@ class ConversationRepository:
     def __init__(self, db: AsyncClient):
         self.db = db
         self.crypto = get_crypto_engine()
+        self.key_vault = get_key_vault()
 
     # ── IDENTITY FILTER ───────────────────────────────────────────────────────
 
@@ -72,9 +74,17 @@ class ConversationRepository:
             res = await q.maybe_single().execute()
             result = res.data if res else None
             if result and "title" in result and result["title"] is not None:
-                result["title"] = self.crypto.safe_decrypt_text(
-                    result["title"], context="conversations.title", fallback="[Encrypted Title]"
-                )
+                dek: bytes | None = None
+                if identity.user_id:
+                    dek = await self.key_vault.get_user_dek_or_none(identity.user_id, self.db)
+                if result.get("enc_version") == 1 and dek is not None:
+                    result["title"] = self.crypto.safe_decrypt_text_with_dek(
+                        result["title"], dek, context="conversations.title", fallback="[Encrypted Title]"
+                    )
+                else:
+                    result["title"] = self.crypto.safe_decrypt_text(
+                        result["title"], context="conversations.title", fallback="[Encrypted Title]"
+                    )
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "SELECT conversation get_conversation finished: found=%s in %.2fms",
@@ -104,17 +114,33 @@ class ConversationRepository:
             identity.device_id,
         )
         try:
+            dek: bytes | None = None
+            if identity.user_id:
+                dek = await self.key_vault.get_user_dek_or_none(identity.user_id, self.db)
+
+            enc_version = 1 if (identity.user_id and dek is not None) else 0
+            if dek is not None:
+                enc_title = self.crypto.encrypt_text_with_dek(clean_title, dek)
+            else:
+                enc_title = self.crypto.encrypt_text(clean_title)
+
             row = {
                 "user_id": identity.user_id,
                 "device_id": identity.device_id,
-                "title": self.crypto.encrypt_text(clean_title),
+                "title": enc_title,
+                "enc_version": enc_version,
             }
             res = await self.db.table(self.CONVERSATIONS_TABLE).insert(row).execute()
             created_row = res.data[0]
             if "title" in created_row and created_row["title"] is not None:
-                created_row["title"] = self.crypto.safe_decrypt_text(
-                    created_row["title"], context="conversations.title", fallback="[Encrypted Title]"
-                )
+                if created_row.get("enc_version") == 1 and dek is not None:
+                    created_row["title"] = self.crypto.safe_decrypt_text_with_dek(
+                        created_row["title"], dek, context="conversations.title", fallback="[Encrypted Title]"
+                    )
+                else:
+                    created_row["title"] = self.crypto.safe_decrypt_text(
+                        created_row["title"], context="conversations.title", fallback="[Encrypted Title]"
+                    )
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "INSERT conversation create_conversation succeeded: id=%s in %.2fms",
@@ -152,11 +178,20 @@ class ConversationRepository:
                 .execute()
             )
             rows = res.data if res else []
+            dek: bytes | None = None
+            if identity.user_id:
+                dek = await self.key_vault.get_user_dek_or_none(identity.user_id, self.db)
+
             for row in rows:
                 if "title" in row and row["title"] is not None:
-                    row["title"] = self.crypto.safe_decrypt_text(
-                        row["title"], context="conversations.title", fallback="[Encrypted Title]"
-                    )
+                    if row.get("enc_version") == 1 and dek is not None:
+                        row["title"] = self.crypto.safe_decrypt_text_with_dek(
+                            row["title"], dek, context="conversations.title", fallback="[Encrypted Title]"
+                        )
+                    else:
+                        row["title"] = self.crypto.safe_decrypt_text(
+                            row["title"], context="conversations.title", fallback="[Encrypted Title]"
+                        )
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "SELECT conversations list_conversations succeeded: returned %d rows in %.2fms",
@@ -188,9 +223,19 @@ class ConversationRepository:
         )
         try:
             now = datetime.now(timezone.utc).isoformat()
+            dek: bytes | None = None
+            if identity.user_id:
+                dek = await self.key_vault.get_user_dek_or_none(identity.user_id, self.db)
+
+            enc_version = 1 if (identity.user_id and dek is not None) else 0
+            if dek is not None:
+                enc_title = self.crypto.encrypt_text_with_dek(clean_title, dek)
+            else:
+                enc_title = self.crypto.encrypt_text(clean_title)
+
             q = (
                 self.db.table(self.CONVERSATIONS_TABLE)
-                .update({"title": self.crypto.encrypt_text(clean_title), "updated_at": now})
+                .update({"title": enc_title, "enc_version": enc_version, "updated_at": now})
                 .eq("id", conversation_id)
                 .is_("deleted_at", "null")
             )
@@ -198,9 +243,14 @@ class ConversationRepository:
             res = await q.execute()
             result = res.data[0] if res and res.data else None
             if result and "title" in result and result["title"] is not None:
-                result["title"] = self.crypto.safe_decrypt_text(
-                    result["title"], context="conversations.title", fallback="[Encrypted Title]"
-                )
+                if result.get("enc_version") == 1 and dek is not None:
+                    result["title"] = self.crypto.safe_decrypt_text_with_dek(
+                        result["title"], dek, context="conversations.title", fallback="[Encrypted Title]"
+                    )
+                else:
+                    result["title"] = self.crypto.safe_decrypt_text(
+                        result["title"], context="conversations.title", fallback="[Encrypted Title]"
+                    )
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "UPDATE conversation update_title finished: conversation_id=%s, found=%s in %.2fms",
@@ -223,7 +273,7 @@ class ConversationRepository:
     # ── CHAT MESSAGES ─────────────────────────────────────────────────────────
 
     async def get_messages(
-        self, conversation_id: str, limit: int = 20, offset: int = 0
+        self, conversation_id: str, limit: int = 20, offset: int = 0, identity: Identity | None = None
     ) -> tuple[list[dict], int]:
         """Fetch paginated messages for a conversation ordered chronologically (asc)."""
         start_time = time.perf_counter()
@@ -251,11 +301,25 @@ class ConversationRepository:
                 .execute()
             )
             rows = res.data if res else []
+            dek: bytes | None = None
+            user_id = identity.user_id if (identity and identity.user_id) else None
+            if not user_id:
+                conv = await self.db.table(self.CONVERSATIONS_TABLE).select("user_id").eq("id", conversation_id).maybe_single().execute()
+                if conv and conv.data:
+                    user_id = conv.data.get("user_id")
+            if user_id:
+                dek = await self.key_vault.get_user_dek_or_none(user_id, self.db)
+
             for row in rows:
                 if "content" in row and row["content"] is not None:
-                    row["content"] = self.crypto.safe_decrypt_text(
-                        row["content"], context="chat_messages.content", fallback="[Encrypted Message]"
-                    )
+                    if row.get("enc_version") == 1 and dek is not None:
+                        row["content"] = self.crypto.safe_decrypt_text_with_dek(
+                            row["content"], dek, context="chat_messages.content", fallback="[Encrypted Message]"
+                        )
+                    else:
+                        row["content"] = self.crypto.safe_decrypt_text(
+                            row["content"], context="chat_messages.content", fallback="[Encrypted Message]"
+                        )
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "SELECT chat_messages get_messages succeeded: returned %d/%d rows in %.2fms",
@@ -275,7 +339,9 @@ class ConversationRepository:
             )
             raise
 
-    async def add_message(self, conversation_id: str, sender: str, content: str) -> dict:
+    async def add_message(
+        self, conversation_id: str, sender: str, content: str, identity: Identity | None = None
+    ) -> dict:
         """Insert a user or assistant message into the conversation."""
         start_time = time.perf_counter()
         logger.debug(
@@ -285,17 +351,38 @@ class ConversationRepository:
             len(content),
         )
         try:
+            dek: bytes | None = None
+            user_id = identity.user_id if (identity and identity.user_id) else None
+            if not user_id:
+                conv = await self.db.table(self.CONVERSATIONS_TABLE).select("user_id").eq("id", conversation_id).maybe_single().execute()
+                if conv and conv.data:
+                    user_id = conv.data.get("user_id")
+            if user_id:
+                dek = await self.key_vault.get_user_dek_or_none(user_id, self.db)
+
+            enc_version = 1 if dek is not None else 0
+            if dek is not None:
+                enc_content = self.crypto.encrypt_text_with_dek(content, dek)
+            else:
+                enc_content = self.crypto.encrypt_text(content)
+
             row = {
                 "conversation_id": conversation_id,
                 "sender": sender,
-                "content": self.crypto.encrypt_text(content),
+                "content": enc_content,
+                "enc_version": enc_version,
             }
             res = await self.db.table(self.MESSAGES_TABLE).insert(row).execute()
             created_row = res.data[0]
             if "content" in created_row and created_row["content"] is not None:
-                created_row["content"] = self.crypto.safe_decrypt_text(
-                    created_row["content"], context="chat_messages.content", fallback="[Encrypted Message]"
-                )
+                if created_row.get("enc_version") == 1 and dek is not None:
+                    created_row["content"] = self.crypto.safe_decrypt_text_with_dek(
+                        created_row["content"], dek, context="chat_messages.content", fallback="[Encrypted Message]"
+                    )
+                else:
+                    created_row["content"] = self.crypto.safe_decrypt_text(
+                        created_row["content"], context="chat_messages.content", fallback="[Encrypted Message]"
+                    )
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "INSERT chat_messages add_message succeeded: id=%s in %.2fms",

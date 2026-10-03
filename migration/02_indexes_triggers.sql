@@ -2,24 +2,38 @@
 -- Idempotent performance indexes, trigger functions, and RPC helper functions
 
 -- ── 1. PERFORMANCE INDEXES ───────────────────────────────────────────────────
+-- Users
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_active_username ON users (LOWER(username)) WHERE deleted_at IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_active_email ON users (LOWER(email)) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_active_google_id ON users (google_id) WHERE deleted_at IS NULL AND google_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_users_email_verified ON users (email_verified_at) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_users_mobile ON users (mobile_number) WHERE deleted_at IS NULL AND mobile_number IS NOT NULL;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_users_active_google_id ON users (google_id) WHERE deleted_at IS NULL AND google_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_users_2fa_enabled ON users (id) WHERE is_2fa_enabled IS TRUE;
+
+-- Devices
 CREATE INDEX IF NOT EXISTS idx_devices_hardware ON devices (name) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_devices_user ON devices (user_id) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_devices_trial_consumed ON devices (name) WHERE trial_consumed_at IS NOT NULL;
+
+-- Receipts
 CREATE INDEX IF NOT EXISTS idx_receipts_identity ON receipts (device_id, user_id) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_receipts_guest_migration ON receipts (device_id) WHERE user_id IS NULL AND deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_receipts_updated_at ON receipts (updated_at DESC) WHERE deleted_at IS NULL;
+
+-- Conversations & Chat Messages
 CREATE INDEX IF NOT EXISTS idx_conversations_identity ON conversations (device_id, user_id) WHERE deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_conversations_guest_migration ON conversations (device_id) WHERE user_id IS NULL AND deleted_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_chat_messages_conv ON chat_messages (conversation_id, created_at ASC);
+
+-- Forget Password
 CREATE INDEX IF NOT EXISTS idx_forget_password_user ON forget_password (user_id) WHERE is_used IS FALSE;
 CREATE INDEX IF NOT EXISTS idx_forget_password_token ON forget_password (reset_token_hash) WHERE is_used IS FALSE;
-CREATE INDEX IF NOT EXISTS idx_users_2fa_enabled ON users (id) WHERE is_2fa_enabled IS TRUE;
+
+-- Compliance & Storage Scrubbing
+CREATE INDEX IF NOT EXISTS idx_deletion_audit_log_user ON deletion_audit_log (user_id);
+CREATE INDEX IF NOT EXISTS idx_deletion_audit_log_email_hash ON deletion_audit_log (email_hash);
+CREATE INDEX IF NOT EXISTS idx_storage_del_q_user ON storage_deletion_queue (user_id);
+CREATE INDEX IF NOT EXISTS idx_storage_del_q_status ON storage_deletion_queue (status) WHERE status != 'complete';
 
 -- ── 2. TRIGGER FUNCTION: AUTO-UPDATE updated_at COLUMN ──────────────────────
 CREATE OR REPLACE FUNCTION set_updated_at_column()
@@ -48,6 +62,11 @@ FOR EACH ROW EXECUTE FUNCTION set_updated_at_column();
 DROP TRIGGER IF EXISTS update_conversations_updated_at ON conversations;
 CREATE TRIGGER update_conversations_updated_at
 BEFORE UPDATE ON conversations
+FOR EACH ROW EXECUTE FUNCTION set_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_user_keys_updated_at ON user_keys;
+CREATE TRIGGER update_user_keys_updated_at
+BEFORE UPDATE ON user_keys
 FOR EACH ROW EXECUTE FUNCTION set_updated_at_column();
 
 -- ── 3. TRIGGER FUNCTION: AUTO-UPDATE CONVERSATION updated_at ON NEW MESSAGE ──

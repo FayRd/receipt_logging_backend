@@ -19,6 +19,7 @@ from src.Models.Users.user_repository import UserRepository
 from src.Services.image_service import ImageStorageService, validate_image_size
 from src.Services.quota_service import QuotaService
 from src.config import get_settings
+from src.Infrastructure.key_vault import get_key_vault
 
 router = APIRouter(prefix="/receipts", tags=["Receipts"])
 logger = get_logger("API.receipts")
@@ -168,7 +169,12 @@ async def get_receipt_image(
     if not storage_path:
         raise HTTPException(status_code=404, detail="Receipt has no attached image.")
 
-    data = await image_storage.download_receipt_image(storage_path)
+    dek = None
+    if identity.user_id:
+        key_vault = get_key_vault()
+        dek = await key_vault.get_user_dek_or_none(identity.user_id, repo.db)
+
+    data = await image_storage.download_receipt_image(storage_path, dek=dek)
     if not data:
         raise HTTPException(status_code=404, detail="Receipt image file not found in storage.")
 
@@ -303,11 +309,17 @@ async def create_receipt(
         validate_image_size(image_bytes, max_bytes=_settings.max_upload_size_bytes)
 
         user_id = identity.user_id or identity.device_id
+        dek = None
+        if identity.user_id:
+            key_vault = get_key_vault()
+            dek = await key_vault.get_user_dek_or_none(identity.user_id, repo.db)
+
         receipt_image_path = await image_storage.upload_receipt_image(
             user_id=user_id,
             receipt_id=receipt_id,
             image_bytes=image_bytes,
             target_max_bytes=_settings.max_compressed_image_bytes,
+            dek=dek,
         )
         logger.info(
             "create_receipt: image uploaded → %s for receipt_id=%s",
@@ -447,6 +459,10 @@ async def create_receipts_batch(
     receipt_ids = [str(uuid.uuid4()) for _ in receipts]
     receipt_image_paths: list[str | None] = [None] * len(receipts)
     user_id = identity.user_id or identity.device_id
+    batch_dek: bytes | None = None
+    if identity.user_id:
+        key_vault = get_key_vault()
+        batch_dek = await key_vault.get_user_dek_or_none(identity.user_id, repo.db)
 
     if uploaded_files:
         for uploaded_file in uploaded_files:
@@ -486,6 +502,7 @@ async def create_receipts_batch(
                 receipt_id=receipt_ids[matched_index],
                 image_bytes=raw_bytes,
                 target_max_bytes=_settings.max_compressed_image_bytes,
+                dek=batch_dek,
             )
             receipt_image_paths[matched_index] = path
             logger.info(
@@ -615,11 +632,17 @@ async def update_receipt(
         validate_image_size(image_bytes, max_bytes=_settings.max_upload_size_bytes)
 
         user_id = identity.user_id or identity.device_id
+        update_dek = None
+        if identity.user_id:
+            key_vault = get_key_vault()
+            update_dek = await key_vault.get_user_dek_or_none(identity.user_id, repo.db)
+
         receipt_image_path = await image_storage.upload_receipt_image(
             user_id=user_id,
             receipt_id=receipt_id,
             image_bytes=image_bytes,
             target_max_bytes=_settings.max_compressed_image_bytes,
+            dek=update_dek,
         )
         logger.info(
             "update_receipt: image uploaded → %s for receipt_id=%s",

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from supabase import AsyncClient
 from src.Infrastructure.logger import get_logger
 from src.Infrastructure.crypto import get_crypto_engine
+from src.Infrastructure.key_vault import get_key_vault
 from src.Models.schemas import Receipt
 from src.Auth.identity import Identity
 
@@ -26,6 +27,7 @@ class ReceiptRepository:
     def __init__(self, db: AsyncClient):
         self.db = db
         self.crypto = get_crypto_engine()
+        self.key_vault = get_key_vault()
 
     # ── INTERNAL HELPERS ──────────────────────────────────────────────────────
 
@@ -73,11 +75,20 @@ class ReceiptRepository:
 
             response = await query.execute()
             rows = response.data if response else []
+            dek: bytes | None = None
+            if identity.user_id:
+                dek = await self.key_vault.get_user_dek_or_none(identity.user_id, self.db)
+
             for row in rows:
                 if "receipt" in row and row["receipt"] is not None:
-                    row["receipt"] = self.crypto.safe_decrypt_json(
-                        row["receipt"], context="receipts.receipt", fallback=self.FALLBACK_RECEIPT
-                    )
+                    if row.get("enc_version") == 1 and dek is not None:
+                        row["receipt"] = self.crypto.safe_decrypt_json_with_dek(
+                            row["receipt"], dek, context="receipts.receipt", fallback=self.FALLBACK_RECEIPT
+                        )
+                    else:
+                        row["receipt"] = self.crypto.safe_decrypt_json(
+                            row["receipt"], context="receipts.receipt", fallback=self.FALLBACK_RECEIPT
+                        )
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "SELECT receipts get_all_by_identity succeeded: returned %d rows in %.2fms",
@@ -115,9 +126,17 @@ class ReceiptRepository:
             response = await query.maybe_single().execute()
             result = response.data if response else None
             if result and "receipt" in result and result["receipt"] is not None:
-                result["receipt"] = self.crypto.safe_decrypt_json(
-                    result["receipt"], context="receipts.receipt", fallback=self.FALLBACK_RECEIPT
-                )
+                dek: bytes | None = None
+                if identity.user_id:
+                    dek = await self.key_vault.get_user_dek_or_none(identity.user_id, self.db)
+                if result.get("enc_version") == 1 and dek is not None:
+                    result["receipt"] = self.crypto.safe_decrypt_json_with_dek(
+                        result["receipt"], dek, context="receipts.receipt", fallback=self.FALLBACK_RECEIPT
+                    )
+                else:
+                    result["receipt"] = self.crypto.safe_decrypt_json(
+                        result["receipt"], context="receipts.receipt", fallback=self.FALLBACK_RECEIPT
+                    )
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "SELECT receipt get_by_id finished: found=%s in %.2fms",
@@ -161,10 +180,21 @@ class ReceiptRepository:
             receipt.merchant_name,
         )
         try:
+            dek: bytes | None = None
+            if identity.user_id:
+                dek = await self.key_vault.get_user_dek_or_none(identity.user_id, self.db)
+
+            enc_version = 1 if (identity.user_id and dek is not None) else 0
+            if dek is not None:
+                enc_receipt = self.crypto.encrypt_json_with_dek(receipt.model_dump(mode="json"), dek)
+            else:
+                enc_receipt = self.crypto.encrypt_json(receipt.model_dump(mode="json"))
+
             row: dict = {
                 "user_id": identity.user_id,
                 "device_id": identity.device_id,
-                "receipt": self.crypto.encrypt_json(receipt.model_dump(mode="json")),
+                "receipt": enc_receipt,
+                "enc_version": enc_version,
             }
             if receipt_id:
                 row["id"] = receipt_id
@@ -174,9 +204,14 @@ class ReceiptRepository:
             response = await self.db.table(self.TABLE).insert(row).execute()
             created_row = response.data[0]
             if "receipt" in created_row and created_row["receipt"] is not None:
-                created_row["receipt"] = self.crypto.safe_decrypt_json(
-                    created_row["receipt"], context="receipts.receipt", fallback=self.FALLBACK_RECEIPT
-                )
+                if created_row.get("enc_version") == 1 and dek is not None:
+                    created_row["receipt"] = self.crypto.safe_decrypt_json_with_dek(
+                        created_row["receipt"], dek, context="receipts.receipt", fallback=self.FALLBACK_RECEIPT
+                    )
+                else:
+                    created_row["receipt"] = self.crypto.safe_decrypt_json(
+                        created_row["receipt"], context="receipts.receipt", fallback=self.FALLBACK_RECEIPT
+                    )
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "INSERT receipt create succeeded: id=%s in %.2fms",
@@ -215,12 +250,23 @@ class ReceiptRepository:
             identity.device_id,
         )
         try:
+            dek: bytes | None = None
+            if identity.user_id:
+                dek = await self.key_vault.get_user_dek_or_none(identity.user_id, self.db)
+
+            enc_version = 1 if (identity.user_id and dek is not None) else 0
             rows = []
             for i, r in enumerate(receipts):
+                if dek is not None:
+                    enc_receipt = self.crypto.encrypt_json_with_dek(r.model_dump(mode="json"), dek)
+                else:
+                    enc_receipt = self.crypto.encrypt_json(r.model_dump(mode="json"))
+
                 row: dict = {
                     "user_id": identity.user_id,
                     "device_id": identity.device_id,
-                    "receipt": self.crypto.encrypt_json(r.model_dump(mode="json")),
+                    "receipt": enc_receipt,
+                    "enc_version": enc_version,
                 }
                 if receipt_ids and i < len(receipt_ids) and receipt_ids[i]:
                     row["id"] = receipt_ids[i]
@@ -232,9 +278,14 @@ class ReceiptRepository:
             inserted_rows = response.data if response else []
             for row in inserted_rows:
                 if "receipt" in row and row["receipt"] is not None:
-                    row["receipt"] = self.crypto.safe_decrypt_json(
-                        row["receipt"], context="receipts.receipt", fallback=self.FALLBACK_RECEIPT
-                    )
+                    if row.get("enc_version") == 1 and dek is not None:
+                        row["receipt"] = self.crypto.safe_decrypt_json_with_dek(
+                            row["receipt"], dek, context="receipts.receipt", fallback=self.FALLBACK_RECEIPT
+                        )
+                    else:
+                        row["receipt"] = self.crypto.safe_decrypt_json(
+                            row["receipt"], context="receipts.receipt", fallback=self.FALLBACK_RECEIPT
+                        )
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "INSERT receipts create_batch succeeded: inserted %d rows in %.2fms",
@@ -293,10 +344,19 @@ class ReceiptRepository:
         try:
             now = datetime.now(timezone.utc).isoformat()
             updates: dict = {"updated_at": now}
+            dek: bytes | None = None
+            if identity.user_id:
+                dek = await self.key_vault.get_user_dek_or_none(identity.user_id, self.db)
+
             if receipt is not None:
                 await self._preserve_existing_fields(receipt_id, identity, receipt)
-                updates["receipt"] = self.crypto.encrypt_json(receipt.model_dump(mode="json"))
-                logger.debug("UPDATE receipt: updating receipt JSON for receipt_id=%s", receipt_id)
+                enc_version = 1 if (identity.user_id and dek is not None) else 0
+                if dek is not None:
+                    updates["receipt"] = self.crypto.encrypt_json_with_dek(receipt.model_dump(mode="json"), dek)
+                else:
+                    updates["receipt"] = self.crypto.encrypt_json(receipt.model_dump(mode="json"))
+                updates["enc_version"] = enc_version
+                logger.debug("UPDATE receipt: updating receipt JSON for receipt_id=%s (enc_version=%d)", receipt_id, enc_version)
             if receipt_image_path is not None:
                 updates["receipt_image_path"] = receipt_image_path
                 logger.debug("UPDATE receipt: updating receipt_image_path=%s", receipt_image_path)
@@ -311,9 +371,14 @@ class ReceiptRepository:
             response = await query.execute()
             updated_row = response.data[0] if (response and response.data) else None
             if updated_row and "receipt" in updated_row and updated_row["receipt"] is not None:
-                updated_row["receipt"] = self.crypto.safe_decrypt_json(
-                    updated_row["receipt"], context="receipts.receipt", fallback=self.FALLBACK_RECEIPT
-                )
+                if updated_row.get("enc_version") == 1 and dek is not None:
+                    updated_row["receipt"] = self.crypto.safe_decrypt_json_with_dek(
+                        updated_row["receipt"], dek, context="receipts.receipt", fallback=self.FALLBACK_RECEIPT
+                    )
+                else:
+                    updated_row["receipt"] = self.crypto.safe_decrypt_json(
+                        updated_row["receipt"], context="receipts.receipt", fallback=self.FALLBACK_RECEIPT
+                    )
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info(
                 "UPDATE receipt finished: receipt_id=%s, found=%s in %.2fms",

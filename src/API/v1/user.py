@@ -1,10 +1,11 @@
+import hashlib
 import json
 import math
 import re
 import secrets
 from datetime import datetime, timezone
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 from supabase import AsyncClient
 from src.Infrastructure.database import get_supabase_client
 from src.Auth.identity import Identity, get_user_identity, get_scoped_identity
@@ -58,6 +59,9 @@ from src.Services.email_service import (
     send_2fa_action_email,
 )
 from src.config import get_settings
+from src.Infrastructure.key_vault import KeyVault, key_vault, get_key_vault
+from src.Services.storage_scrubber import scrub_pending_storage_deletions
+from scripts.scrub_deleted_user_from_backups import scrub_user_from_all_backups
 
 router = APIRouter(prefix="/user", tags=["Users"])
 logger = get_logger("API.user")
@@ -112,6 +116,12 @@ async def create_user(
         raise HTTPException(status_code=409, detail="An account with this email already exists.")
 
     user = await repo.create(body)
+    user_id = str(user.get("id"))
+    try:
+        key_vault = get_key_vault()
+        await key_vault.provision_user_dek(user_id, repo.db)
+    except Exception as exc:
+        logger.error("Failed to provision DEK for newly registered user %s: %s", user_id, exc)
     logger.info("User created successfully: user_id=%s, username=%s", user.get("id"), user.get("username"))
     return user
 
@@ -369,6 +379,11 @@ async def _handle_google_unverified_claim(
     logger.info("google_auth: claiming unverified account id=%s with google_id=%s", user_by_email.get("id"), google_id)
     claimed_user = await repo.claim_unverified_account_with_google(user_by_email["id"], google_id)
     claimed_user.pop("password", None)
+    try:
+        key_vault = get_key_vault()
+        await key_vault.provision_user_dek(str(claimed_user["id"]), repo.db)
+    except Exception as exc:
+        logger.error("Failed to provision DEK for claimed Google user %s: %s", claimed_user.get("id"), exc)
 
     if not claimed_user.get("avatar_image_path") and picture:
         avatar_folder = await _download_and_upload_google_avatar(
@@ -539,6 +554,11 @@ async def google_auth(
         new_user["avatar_image_path"] = avatar_folder
 
     logger.info("google_auth: successfully registered user_id=%s, username=%s via Google (avatar=%s)", new_user.get("id"), clean_username, new_user.get("avatar_image_path"))
+    try:
+        key_vault = get_key_vault()
+        await key_vault.provision_user_dek(str(new_user["id"]), repo.db)
+    except Exception as exc:
+        logger.error("Failed to provision DEK for new Google user %s: %s", new_user.get("id"), exc)
 
     access_token = create_access_token(user_id=new_user["id"], username=new_user["username"])
     refresh_token = create_refresh_token(user_id=new_user["id"], username=new_user["username"])
@@ -1001,6 +1021,38 @@ async def update_my_profile(
     return updated
 
 
+async def _tombstone_user_devices(user_id: str, db: AsyncClient, kek: str) -> list[str]:
+    """Tombstone user devices under Option B: null push tokens/user_id, hash device_id for anti-abuse."""
+    hashed_device_ids: list[str] = []
+    try:
+        devices_res = await db.table("devices").select("*").eq("user_id", user_id).execute()
+        device_rows = devices_res.data if devices_res and devices_res.data else []
+        for dev in device_rows:
+            dev_raw_id = dev.get("device_id") or dev.get("name") or ""
+            hashed_id = hashlib.sha256((dev_raw_id + kek).encode("utf-8")).hexdigest()
+            hashed_device_ids.append(hashed_id)
+
+            update_dev = {"user_id": None}
+            if "name" in dev and "device_id" not in dev:
+                update_dev["name"] = hashed_id
+            else:
+                update_dev["device_id"] = hashed_id
+                update_dev["fcm_token"] = None
+                if "name" in dev:
+                    update_dev["name"] = hashed_id
+            if "fcm_token" in dev:
+                update_dev["fcm_token"] = None
+
+            dev_pk = dev.get("id")
+            if dev_pk:
+                await db.table("devices").update(update_dev).eq("id", dev_pk).execute()
+            else:
+                await db.table("devices").update(update_dev).eq("user_id", user_id).execute()
+    except Exception as dev_err:
+        logger.error("Error during device tombstoning for user %s: %s", user_id, dev_err)
+    return hashed_device_ids
+
+
 # ── DELETE /user/me ───────────────────────────────────────────────────────────
 @router.delete(
     "/me",
@@ -1009,32 +1061,136 @@ async def update_my_profile(
 )
 async def delete_my_profile(
     request: Request,
+    background_tasks: BackgroundTasks,
     identity: Identity = Depends(get_user_identity),
     repo: UserRepository = Depends(get_repo),
+    db: AsyncClient = Depends(get_supabase_client),
 ):
-    """Soft-delete current authenticated user profile.
+    """Permanently delete authenticated user profile and cryptographically shred data.
 
-    Requires X-User-Name and X-User-Token headers. Omits device headers.
-    If 2FA is enabled, requires X-2FA-OTP header.
+    1. Authenticates user and verifies 2FA OTP if 2FA is enabled.
+    2. Writes start record to deletion_audit_log (status='pending').
+    3. Destroys per-user DEK in user_keys (crypto-shredding enc_version=1 data).
+    4. Hard-deletes legacy enc_version=0 receipts and conversations.
+    5. Enqueues storage deletion in storage_deletion_queue.
+    6. Tombstones linked devices (Option B: hashed device ID, fcm_token=NULL, user_id=NULL).
+    7. Tombstones user identity in users table (email=deleted_<id>@deleted.local, username=deleted_<id>, deleted_at=now()).
+    8. Updates deletion_audit_log (status='complete', timestamps, counts).
+    9. Dispatches background tasks for backup CSV scrub and storage scrub.
+    10. Returns 200 OK.
     """
     logger.debug("Entering delete_my_profile: identity (user_id=%s)", identity.user_id)
     user = await repo.get_by_id(identity.user_id)
     if not user:
-        logger.warning("Soft-delete profile failed: User not found for user_id=%s", identity.user_id)
+        logger.warning("Delete profile failed: User not found or already deleted for user_id=%s", identity.user_id)
         raise HTTPException(
             status_code=404,
             detail="User profile not found or already deleted.",
         )
     _verify_2fa_for_action(user, request)
-    deleted = await repo.soft_delete(identity.user_id)
-    if not deleted:
-        logger.warning("Soft-delete profile failed: User not found or already deleted for user_id=%s", identity.user_id)
-        raise HTTPException(
-            status_code=404,
-            detail="User profile not found or already deleted.",
-        )
-    logger.info("User profile soft-deleted successfully: user_id=%s", identity.user_id)
-    return {"success": True, "message": "User profile soft-deleted successfully."}
+
+    user_id = str(identity.user_id)
+    username = user.get("username")
+    raw_email = str(user.get("email") or "").strip().lower()
+    email_hash = hashlib.sha256(raw_email.encode("utf-8")).hexdigest() if raw_email else None
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    # 1. Audit log start: Insert pending record into deletion_audit_log
+    audit_id = None
+    try:
+        audit_res = await db.table("deletion_audit_log").insert({
+            "user_id": user_id,
+            "username": username,
+            "email_hash": email_hash,
+            "requested_at": now_iso,
+            "status": "pending",
+        }).execute()
+        if audit_res and audit_res.data:
+            audit_id = audit_res.data[0].get("id")
+    except Exception as audit_init_err:
+        logger.warning("Failed to insert initial record in deletion_audit_log: %s", audit_init_err)
+
+    # 2. Destroy user DEK: crypto-shreds all enc_version=1 records
+    await key_vault.destroy_user_dek(user_id, db)
+    dek_destroyed_at = datetime.now(timezone.utc).isoformat()
+
+    # 3. Hard-delete legacy enc_version = 0 rows
+    rows_hard_deleted = 0
+    rows_crypto_shredded = 0
+    try:
+        rec_hard = await db.table("receipts").select("id").eq("user_id", user_id).eq("enc_version", 0).execute()
+        conv_hard = await db.table("conversations").select("id").eq("user_id", user_id).eq("enc_version", 0).execute()
+        rows_hard_deleted = len(rec_hard.data or []) + len(conv_hard.data or [])
+
+        rec_crypto = await db.table("receipts").select("id").eq("user_id", user_id).neq("enc_version", 0).execute()
+        conv_crypto = await db.table("conversations").select("id").eq("user_id", user_id).neq("enc_version", 0).execute()
+        rows_crypto_shredded = len(rec_crypto.data or []) + len(conv_crypto.data or [])
+
+        await db.table("receipts").delete().eq("user_id", user_id).eq("enc_version", 0).execute()
+        await db.table("conversations").delete().eq("user_id", user_id).eq("enc_version", 0).execute()
+    except Exception as del_err:
+        logger.error("Error hard-deleting legacy enc_version=0 rows for user %s: %s", user_id, del_err)
+
+    # 4. Enqueue Storage scrub in storage_deletion_queue
+    try:
+        await db.table("storage_deletion_queue").insert({
+            "user_id": user_id,
+            "storage_prefix": f"{user_id}/",
+            "status": "pending",
+        }).execute()
+    except Exception as queue_err:
+        logger.error("Failed to enqueue storage deletion for user %s: %s", user_id, queue_err)
+
+    # 5. Device Tombstone (Option B: Anti-Abuse Pseudonymization)
+    hashed_device_ids = await _tombstone_user_devices(user_id, db, _settings.data_encryption_key)
+
+    # 6. Identity Tombstone on users table
+    # Strip trial_device_id from preferences to enforce GDPR storage limitation (Art. 5(1)(e))
+    current_prefs = dict(user.get("preferences") or {})
+    current_prefs.pop("trial_device_id", None)
+
+    identity_tombstone = {
+        "email": f"deleted_{user_id}@deleted.local",
+        "username": f"deleted_{user_id}",
+        "country_code": None,
+        "mobile_number": None,
+        "avatar_image_path": None,
+        "preferences": current_prefs,
+        "deleted_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await db.table("users").update(identity_tombstone).eq("id", user_id).execute()
+
+    # 7. Update deletion_audit_log to complete
+    audit_update_payload = {
+        "status": "complete",
+        "dek_destroyed_at": dek_destroyed_at,
+        "rows_hard_deleted": rows_hard_deleted,
+        "rows_crypto_shredded": rows_crypto_shredded,
+    }
+    try:
+        if audit_id is not None:
+            await db.table("deletion_audit_log").update(audit_update_payload).eq("id", audit_id).execute()
+        else:
+            await db.table("deletion_audit_log").update(audit_update_payload).eq("user_id", user_id).execute()
+    except Exception as audit_upd_err:
+        logger.warning("Failed to update deletion_audit_log to complete for user %s: %s", user_id, audit_upd_err)
+
+    # 8. Background tasks: Backup CSV scrubber and Storage scrubber
+    background_tasks.add_task(
+        scrub_user_from_all_backups,
+        user_id=user_id,
+        hashed_device_ids=hashed_device_ids,
+    )
+    background_tasks.add_task(
+        scrub_pending_storage_deletions,
+        db=db,
+    )
+
+    logger.info("User account permanently deleted and data cryptographically shredded for user_id=%s", user_id)
+    return {
+        "success": True,
+        "message": "Account permanently deleted and data cryptographically shredded.",
+    }
 
 
 # ── POST /user/reset-password-initiate ───────────────────────────────────────

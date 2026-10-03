@@ -250,20 +250,26 @@ class ImageStorageService:
         receipt_id: str,
         image_bytes: bytes,
         target_max_bytes: int = 5 * 1024 * 1024,
+        dek: bytes | None = None,
     ) -> str:
         """Compress and encrypt a receipt image with AES-256-GCM to {user_id}/receipt_images/{receipt_id}.jpg.
 
+        If `dek` is provided, encrypts with the per-user DEK; otherwise falls back to global key.
         Returns the full storage path for storage in receipts.receipt_image_path.
         """
         compressed = compress_receipt_image(image_bytes, target_max_bytes=target_max_bytes)
-        encrypted_bytes = self.crypto.encrypt_bytes(compressed)
+        if dek is not None:
+            encrypted_bytes = self.crypto.encrypt_bytes_with_dek(compressed, dek)
+        else:
+            encrypted_bytes = self.crypto.encrypt_bytes(compressed)
         path = f"{user_id}/receipt_images/{receipt_id}.jpg"
 
         logger.debug(
-            "ImageStorageService.upload_receipt_image: uploading encrypted %s (%d raw -> %d encrypted bytes) to bucket=%s",
+            "ImageStorageService.upload_receipt_image: uploading encrypted %s (%d raw -> %d encrypted bytes, per_user_dek=%s) to bucket=%s",
             path,
             len(compressed),
             len(encrypted_bytes),
+            dek is not None,
             self.bucket,
         )
         await self.db.storage.from_(self.bucket).upload(
@@ -273,9 +279,10 @@ class ImageStorageService:
         )
 
         logger.info(
-            "ImageStorageService.upload_receipt_image: receipt_id=%s → %s (encrypted at rest)",
+            "ImageStorageService.upload_receipt_image: receipt_id=%s → %s (encrypted at rest, per_user_dek=%s)",
             receipt_id,
             path,
+            dek is not None,
         )
         return path
 
@@ -306,8 +313,13 @@ class ImageStorageService:
             )
             return None
 
-    async def download_receipt_image(self, storage_path: str) -> bytes | None:
-        """Download and decrypt a receipt image from Supabase Storage given its storage_path."""
+    async def download_receipt_image(
+        self, storage_path: str, dek: bytes | None = None
+    ) -> bytes | None:
+        """Download and decrypt a receipt image from Supabase Storage given its storage_path.
+
+        If `dek` is provided, decrypts using per-user DEK (with fallback to global key).
+        """
         if not storage_path:
             return None
         try:
@@ -318,7 +330,14 @@ class ImageStorageService:
             )
             raw_data = await self.db.storage.from_(self.bucket).download(storage_path)
             if raw_data:
-                decrypted = self.crypto.safe_decrypt_bytes(raw_data, context=f"storage:{storage_path}")
+                if dek is not None:
+                    decrypted = self.crypto.safe_decrypt_bytes_with_dek(
+                        raw_data, dek, context=f"storage:{storage_path}"
+                    )
+                else:
+                    decrypted = self.crypto.safe_decrypt_bytes(
+                        raw_data, context=f"storage:{storage_path}"
+                    )
                 return decrypted
             return None
         except Exception as e:

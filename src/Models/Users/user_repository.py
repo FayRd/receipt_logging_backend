@@ -604,11 +604,15 @@ class UserRepository:
             return False
         clean_device = device_id.strip()
         try:
-            # 1. Check devices table if device was flagged with trial_consumed_at
+            from src.config import get_settings
+            settings = get_settings()
+            hashed_device = hashlib.sha256((clean_device + settings.data_encryption_key).encode("utf-8")).hexdigest()
+
+            # 1. Check devices table if device was flagged with trial_consumed_at (raw or tombstoned hash)
             res_dev_trial = await (
                 self.db.table("devices")
                 .select("id")
-                .eq("name", clean_device)
+                .in_("name", [clean_device, hashed_device])
                 .not_.is_("trial_consumed_at", "null")
                 .limit(1)
                 .execute()
@@ -617,11 +621,15 @@ class UserRepository:
                 logger.info("check_device_trial_used: matched devices.trial_consumed_at for device=%s", clean_device)
                 return True
 
-            # 2. Check users table preferences for trial_device_id where trial was actually granted
+            # 2. Legacy fallback: Check active users table preferences for trial_device_id where trial was actually granted.
+            #    This covers records created before TODO-19. For all deleted/tombstoned users,
+            #    trial_device_id is stripped from preferences during the deletion pipeline.
+            #    Pass 1 (devices table) is the authoritative source for tombstoned devices.
             res = await (
                 self.db.table(self.TABLE)
                 .select("id, tier, preferences")
                 .contains("preferences", {"trial_device_id": clean_device})
+                .is_("deleted_at", "null")
                 .execute()
             )
             if res and res.data:
@@ -650,6 +658,21 @@ class UserRepository:
                 .execute()
             )
             if not res or not res.data:
+                # Also check deletion_audit_log for tombstoned/soft-deleted accounts
+                email_hash = hashlib.sha256(clean_email.encode("utf-8")).hexdigest()
+                audit_res = await (
+                    self.db.table("deletion_audit_log")
+                    .select("id")
+                    .eq("email_hash", email_hash)
+                    .limit(1)
+                    .execute()
+                )
+                if audit_res and audit_res.data:
+                    logger.info(
+                        "check_email_trial_or_purchase_used: matched deletion_audit_log for email_hash=%s",
+                        email_hash
+                    )
+                    return True
                 return False
             for row in res.data:
                 tier = (row.get("tier") or "").lower()

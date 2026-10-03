@@ -1,4 +1,5 @@
 import base64
+from functools import lru_cache
 import json
 import os
 from typing import Any
@@ -366,6 +367,65 @@ class CryptoEngine:
                 return fallback
             raise
 
+    # ── DEK-PARAMETERIZED OVERLOADS ──────────────────────────────────────────
+
+    def encrypt_text_with_dek(self, plaintext: str, dek: bytes, aad: bytes | None = None) -> str:
+        """Encrypt text using a per-user DEK."""
+        return encrypt_text_with_dek(plaintext, dek, aad=aad)
+
+    def decrypt_text_with_dek(self, envelope: str, dek: bytes, aad: bytes | None = None) -> str:
+        """Decrypt text envelope using a per-user DEK."""
+        return decrypt_text_with_dek(envelope, dek, aad=aad)
+
+    def encrypt_json_with_dek(self, payload: dict, dek: bytes, aad: bytes | None = None) -> dict:
+        """Encrypt JSON dict using a per-user DEK."""
+        return encrypt_json_with_dek(payload, dek, aad=aad)
+
+    def decrypt_json_with_dek(self, payload: dict | str | None, dek: bytes, aad: bytes | None = None) -> dict:
+        """Decrypt JSON envelope using a per-user DEK."""
+        return decrypt_json_with_dek(payload, dek, aad=aad)
+
+    def safe_decrypt_json_with_dek(
+        self,
+        payload: Any,
+        dek: bytes,
+        context: str = "",
+        fallback: Any = None,
+        aad: bytes | None = None,
+    ) -> Any:
+        """Safely decrypt JSON envelope using a per-user DEK with defensive fallback."""
+        return safe_decrypt_json_with_dek(payload, dek, context=context, fallback=fallback, aad=aad)
+
+    def encrypt_bytes_with_dek(self, data: bytes, dek: bytes, aad: bytes | None = None) -> bytes:
+        """Encrypt raw bytes using a per-user DEK."""
+        return encrypt_bytes_with_dek(data, dek, aad=aad)
+
+    def decrypt_bytes_with_dek(self, data: bytes, dek: bytes, aad: bytes | None = None) -> bytes:
+        """Decrypt raw bytes using a per-user DEK."""
+        return decrypt_bytes_with_dek(data, dek, aad=aad)
+
+    def safe_decrypt_text_with_dek(
+        self,
+        envelope: str,
+        dek: bytes,
+        context: str = "",
+        fallback: str | None = None,
+        aad: bytes | None = None,
+    ) -> str:
+        """Safely decrypt text envelope using a per-user DEK with defensive fallback."""
+        return safe_decrypt_text_with_dek(envelope, dek, context=context, fallback=fallback, aad=aad)
+
+    def safe_decrypt_bytes_with_dek(
+        self,
+        data: bytes,
+        dek: bytes,
+        context: str = "",
+        fallback: bytes | None = None,
+        aad: bytes | None = None,
+    ) -> bytes:
+        """Safely decrypt bytes using a per-user DEK with defensive fallback."""
+        return safe_decrypt_bytes_with_dek(data, dek, context=context, fallback=fallback, aad=aad)
+
 
 _crypto_engine: CryptoEngine | None = None
 
@@ -376,3 +436,106 @@ def get_crypto_engine() -> CryptoEngine:
     if _crypto_engine is None:
         _crypto_engine = CryptoEngine()
     return _crypto_engine
+
+
+@lru_cache(maxsize=256)
+def _get_engine_for_dek(dek: bytes) -> CryptoEngine:
+    """Return a cached CryptoEngine configured for the specified per-user DEK."""
+    return CryptoEngine(key=dek)
+
+
+# ── STANDALONE DEK-PARAMETERIZED FUNCTIONS ───────────────────────────────────
+
+def encrypt_text_with_dek(plaintext: str, dek: bytes, aad: bytes | None = None) -> str:
+    """Encrypt plaintext string using per-user DEK."""
+    return _get_engine_for_dek(dek).encrypt_text(plaintext, aad=aad)
+
+
+def decrypt_text_with_dek(envelope: str, dek: bytes, aad: bytes | None = None) -> str:
+    """Decrypt text envelope using per-user DEK."""
+    return _get_engine_for_dek(dek).decrypt_text(envelope, aad=aad)
+
+
+def encrypt_json_with_dek(payload: dict, dek: bytes, aad: bytes | None = None) -> dict:
+    """Encrypt dictionary payload using per-user DEK."""
+    return _get_engine_for_dek(dek).encrypt_json(payload, aad=aad)
+
+
+def decrypt_json_with_dek(payload: dict | str | None, dek: bytes, aad: bytes | None = None) -> dict:
+    """Decrypt JSON envelope or dict payload using per-user DEK."""
+    return _get_engine_for_dek(dek).decrypt_json(payload, aad=aad)
+
+
+def safe_decrypt_json_with_dek(
+    payload: Any,
+    dek: bytes,
+    context: str = "",
+    fallback: Any = None,
+    aad: bytes | None = None,
+) -> Any:
+    """Safely decrypt JSON envelope using per-user DEK with fallback to global key."""
+    try:
+        engine = _get_engine_for_dek(dek)
+        return engine.safe_decrypt_json(payload, aad=aad, context=context, fallback=None)
+    except Exception as exc:
+        try:
+            # Fallback to global engine for legacy records or cross-version data
+            global_engine = get_crypto_engine()
+            return global_engine.safe_decrypt_json(payload, aad=aad, context=context, fallback=fallback)
+        except Exception:
+            if fallback is not None:
+                return fallback
+            raise exc
+
+
+def encrypt_bytes_with_dek(data: bytes, dek: bytes, aad: bytes | None = None) -> bytes:
+    """Encrypt raw bytes using per-user DEK."""
+    return _get_engine_for_dek(dek).encrypt_bytes(data, aad=aad)
+
+
+def decrypt_bytes_with_dek(data: bytes, dek: bytes, aad: bytes | None = None) -> bytes:
+    """Decrypt raw bytes using per-user DEK."""
+    return _get_engine_for_dek(dek).decrypt_bytes(data, aad=aad)
+
+
+def safe_decrypt_text_with_dek(
+    envelope: str,
+    dek: bytes,
+    context: str = "",
+    fallback: str | None = None,
+    aad: bytes | None = None,
+) -> str:
+    """Safely decrypt text envelope using per-user DEK with fallback to global key."""
+    try:
+        engine = _get_engine_for_dek(dek)
+        return engine.safe_decrypt_text(envelope, aad=aad, context=context, fallback=None)
+    except Exception as exc:
+        try:
+            global_engine = get_crypto_engine()
+            return global_engine.safe_decrypt_text(envelope, aad=aad, context=context, fallback=fallback)
+        except Exception:
+            if fallback is not None:
+                return fallback
+            raise exc
+
+
+def safe_decrypt_bytes_with_dek(
+    data: bytes,
+    dek: bytes,
+    context: str = "",
+    fallback: bytes | None = None,
+    aad: bytes | None = None,
+) -> bytes:
+    """Safely decrypt bytes using per-user DEK with fallback to global key."""
+    try:
+        engine = _get_engine_for_dek(dek)
+        return engine.safe_decrypt_bytes(data, aad=aad, context=context, fallback=None)
+    except Exception as exc:
+        try:
+            global_engine = get_crypto_engine()
+            return global_engine.safe_decrypt_bytes(data, aad=aad, context=context, fallback=fallback)
+        except Exception:
+            if fallback is not None:
+                return fallback
+            raise exc
+

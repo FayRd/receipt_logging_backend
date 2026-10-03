@@ -1,14 +1,17 @@
 -- 03_rls_policies.sql
--- Enable Row Level Security (RLS) across all 6 database tables and restrict to service_role
+-- Enable Row Level Security (RLS) across all database tables and restrict to service_role
 -- Anonymous public role ('anon') is strictly denied direct DML access to prevent PostgREST data dumping.
 
--- Enable RLS across all 6 tables
+-- ── 0. ENABLE ROW LEVEL SECURITY ACROSS ALL TABLES ───────────────────────────
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE devices ENABLE ROW LEVEL SECURITY;
 ALTER TABLE receipts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE conversations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE chat_messages ENABLE ROW LEVEL SECURITY;
 ALTER TABLE forget_password ENABLE ROW LEVEL SECURITY;
+ALTER TABLE user_keys ENABLE ROW LEVEL SECURITY;
+ALTER TABLE deletion_audit_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE storage_deletion_queue ENABLE ROW LEVEL SECURITY;
 
 -- ── 1. USERS POLICIES ────────────────────────────────────────────────────────
 DROP POLICY IF EXISTS users_select_policy ON users;
@@ -88,3 +91,27 @@ DROP POLICY IF EXISTS forget_password_update_policy ON forget_password;
 CREATE POLICY forget_password_update_policy ON forget_password FOR UPDATE TO service_role
 USING (TRUE)
 WITH CHECK (TRUE);
+
+-- ── 7. PER-USER ENCRYPTION KEY (DEK) POLICIES ────────────────────────────────
+-- Service role only — users cannot self-serve or read raw DEK envelopes via PostgREST
+DROP POLICY IF EXISTS service_role_only ON user_keys;
+CREATE POLICY service_role_only ON user_keys
+    FOR ALL TO service_role
+    USING (auth.role() = 'service_role')
+    WITH CHECK (auth.role() = 'service_role');
+
+-- ── 8. COMPLIANCE AUDIT TRAIL POLICIES ───────────────────────────────────────
+-- Strictly service role access only for compliance log auditing
+DROP POLICY IF EXISTS service_role_only ON deletion_audit_log;
+CREATE POLICY service_role_only ON deletion_audit_log
+    FOR ALL TO service_role
+    USING (auth.role() = 'service_role')
+    WITH CHECK (auth.role() = 'service_role');
+
+-- ── 9. STORAGE DELETION QUEUE POLICIES ───────────────────────────────────────
+-- Strictly service role access only for asynchronous storage purge queue
+DROP POLICY IF EXISTS service_role_only ON storage_deletion_queue;
+CREATE POLICY service_role_only ON storage_deletion_queue
+    FOR ALL TO service_role
+    USING (auth.role() = 'service_role')
+    WITH CHECK (auth.role() = 'service_role');

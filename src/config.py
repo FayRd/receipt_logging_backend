@@ -8,9 +8,9 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False, extra="ignore")
 
     # Infrastructure Credentials & Services
-    supabase_url: str
-    supabase_key: str  
-    redis_connection_string: str
+    supabase_url: str = ""
+    supabase_key: str = Field(default="", validation_alias=AliasChoices("supabase_key", "supabase_service_role_key"))
+    redis_connection_string: str = ""
     gemini_api_key: str = ""
     openai_api_key: str = ""
     logfire_token: str = ""
@@ -114,6 +114,12 @@ class Settings(BaseSettings):
         "premium": {"max_scans_per_day": 50, "max_chat_tokens_per_day": 50_000},
         "dev": {"max_scans_per_day": -1, "max_chat_tokens_per_day": -1},
     }
+
+    # Cloudflare R2 Backup Storage
+    r2_account_id: str = ""
+    r2_access_key_id: str = ""
+    r2_secret_access_key: str = ""
+    r2_bucket_name: str = "sancfund-backups"
 
     @property
     def effective_ai_provider(self) -> str:

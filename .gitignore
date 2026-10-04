@@ -6,9 +6,17 @@ artifacts/
 otp_dev.log
 app.log
 
-# Migration & Key Rotation Scripts (contain sensitive credential prompts & procedures)
-scripts/
+# Migration & Admin Scripts (ignore all contents of scripts/, only track backup/restore tools)
+scripts/*
+!scripts/backup_database.py
+!scripts/upload_to_r2.py
+!scripts/backup_object_storage.py
+!scripts/restore_object_storage.py
+!scripts/prune_r2_snapshots.py
+
+# Database Backup Dumps (contain sensitive data)
 database/
+scripts/__pycache__/
 
 # Rotation / Migration Audit & Error Logs
 failed_rows_*.log

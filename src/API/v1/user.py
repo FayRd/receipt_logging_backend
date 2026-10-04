@@ -61,7 +61,8 @@ from src.Services.email_service import (
 from src.config import get_settings
 from src.Infrastructure.key_vault import KeyVault, key_vault, get_key_vault
 from src.Services.storage_scrubber import scrub_pending_storage_deletions
-from scripts.scrub_deleted_user_from_backups import scrub_user_from_all_backups
+from src.Services.backup_scrubber import scrub_user_from_all_backups
+from src.Services.r2_scrubber import purge_user_r2_backups
 
 router = APIRouter(prefix="/user", tags=["Users"])
 logger = get_logger("API.user")
@@ -1175,7 +1176,7 @@ async def delete_my_profile(
     except Exception as audit_upd_err:
         logger.warning("Failed to update deletion_audit_log to complete for user %s: %s", user_id, audit_upd_err)
 
-    # 8. Background tasks: Backup CSV scrubber and Storage scrubber
+    # 8. Background tasks: Backup CSV scrubber, Storage scrubber, and R2 backup scrubber
     background_tasks.add_task(
         scrub_user_from_all_backups,
         user_id=user_id,
@@ -1184,6 +1185,10 @@ async def delete_my_profile(
     background_tasks.add_task(
         scrub_pending_storage_deletions,
         db=db,
+    )
+    background_tasks.add_task(
+        purge_user_r2_backups,
+        user_id=user_id,
     )
 
     logger.info("User account permanently deleted and data cryptographically shredded for user_id=%s", user_id)

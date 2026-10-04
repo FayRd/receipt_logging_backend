@@ -1,0 +1,50 @@
+name: "Daily Backup — Database & Object Storage"
+
+on:
+  schedule:
+    - cron: "0 2 * * *"
+  workflow_dispatch:
+
+jobs:
+  daily-backup:
+    name: Execute Daily Database & Object Storage Backup
+    runs-on: ubuntu-latest
+    env:
+      SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      SUPABASE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+      DATA_ENCRYPTION_KEY: ${{ secrets.DATA_ENCRYPTION_KEY }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      R2_BUCKET_NAME: ${{ secrets.R2_BUCKET_NAME }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install supabase boto3 cryptography python-dotenv httpx pydantic pydantic-settings
+
+      - name: Dump database
+        run: |
+          python scripts/backup_database.py --output-dir /tmp/db_backup
+
+      - name: Upload database to R2
+        run: |
+          python scripts/upload_to_r2.py --source /tmp/db_backup --r2-prefix "db/backup_$(date +%Y%m%d)"
+
+      - name: Mirror object storage to R2
+        run: |
+          python scripts/backup_object_storage.py --date "$(date +%Y%m%d)"
+
+      - name: Prune old snapshots
+        run: |
+          python scripts/prune_r2_snapshots.py --keep-days 7

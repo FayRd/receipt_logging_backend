@@ -1,5 +1,6 @@
 import base64
 from functools import lru_cache
+import hashlib
 import json
 import os
 from typing import Any
@@ -137,15 +138,15 @@ class CryptoEngine:
 
     # ── JSON / DICT ENCRYPTION ({"_enc": "v1", ...}) ────────────────────────
 
-    def encrypt_json(self, data: dict[str, Any], aad: bytes | None = None) -> dict[str, str]:
-        """Encrypt dictionary payload using AES-256-GCM.
+    def encrypt_json(self, data: dict[str, Any] | list[Any], aad: bytes | None = None) -> dict[str, str]:
+        """Encrypt dictionary or list payload using AES-256-GCM.
 
         Returns JSON envelope dict: `{"_enc": "v1", "iv": "...", "tag": "...", "data": "..."}`
         """
-        if not isinstance(data, dict):
+        if not isinstance(data, (dict, list)):
             return data
 
-        if data.get("_enc") == self.ENVELOPE_VERSION:
+        if isinstance(data, dict) and data.get("_enc") == self.ENVELOPE_VERSION:
             # Already encrypted
             return data
 
@@ -377,8 +378,8 @@ class CryptoEngine:
         """Decrypt text envelope using a per-user DEK."""
         return decrypt_text_with_dek(envelope, dek, aad=aad)
 
-    def encrypt_json_with_dek(self, payload: dict, dek: bytes, aad: bytes | None = None) -> dict:
-        """Encrypt JSON dict using a per-user DEK."""
+    def encrypt_json_with_dek(self, payload: dict | list, dek: bytes, aad: bytes | None = None) -> dict:
+        """Encrypt JSON dict or list using a per-user DEK."""
         return encrypt_json_with_dek(payload, dek, aad=aad)
 
     def decrypt_json_with_dek(self, payload: dict | str | None, dek: bytes, aad: bytes | None = None) -> dict:
@@ -456,8 +457,8 @@ def decrypt_text_with_dek(envelope: str, dek: bytes, aad: bytes | None = None) -
     return _get_engine_for_dek(dek).decrypt_text(envelope, aad=aad)
 
 
-def encrypt_json_with_dek(payload: dict, dek: bytes, aad: bytes | None = None) -> dict:
-    """Encrypt dictionary payload using per-user DEK."""
+def encrypt_json_with_dek(payload: dict | list, dek: bytes, aad: bytes | None = None) -> dict:
+    """Encrypt dictionary or list payload using per-user DEK."""
     return _get_engine_for_dek(dek).encrypt_json(payload, aad=aad)
 
 
@@ -538,4 +539,14 @@ def safe_decrypt_bytes_with_dek(
             if fallback is not None:
                 return fallback
             raise exc
+
+
+def compute_mobile_hash(mobile_number: str | None, key: str | bytes) -> str | None:
+    if not mobile_number:
+        return None
+    clean_digits = "".join(c for c in str(mobile_number) if c.isdigit())
+    if not clean_digits:
+        return None
+    key_str = key.decode("utf-8", errors="ignore") if isinstance(key, bytes) else str(key)
+    return hashlib.sha256((clean_digits + key_str).encode("utf-8")).hexdigest()
 

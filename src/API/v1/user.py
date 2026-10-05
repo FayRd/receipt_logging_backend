@@ -1155,8 +1155,10 @@ async def delete_my_profile(
         "username": f"deleted_{user_id}",
         "country_code": None,
         "mobile_number": None,
+        "mobile_hash": None,
         "avatar_image_path": None,
-        "preferences": current_prefs,
+        "custom_categories": [],
+        "preferences": {},
         "deleted_at": datetime.now(timezone.utc).isoformat(),
     }
     await db.table("users").update(identity_tombstone).eq("id", user_id).execute()

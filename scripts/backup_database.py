@@ -58,6 +58,7 @@ BACKEND_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, BACKEND_ROOT)
 
 from src.Infrastructure.crypto import CryptoEngine, get_crypto_engine
+from src.Infrastructure.key_vault import KeyVault
 from src.config import get_settings
 
 ALL_TABLES = [
@@ -109,17 +110,44 @@ def serialize_cell(val: Any) -> str:
     return str(val)
 
 
-def decrypt_row(table: str, row: dict[str, Any], crypto: CryptoEngine) -> dict[str, Any]:
-    """Conditionally decrypt encrypted columns for a row."""
+def decrypt_row(
+    table: str,
+    row: dict[str, Any],
+    crypto: CryptoEngine,
+    user_deks: Optional[dict[str, bytes]] = None,
+    conv_user_map: Optional[dict[str, str]] = None,
+) -> dict[str, Any]:
+    """Conditionally decrypt encrypted columns for a row, supporting both global KEK and per-user DEKs."""
     decrypted_row = dict(row)
+    enc_version = decrypted_row.get("enc_version", 0)
+
+    # Determine user DEK if applicable
+    dek: Optional[bytes] = None
+    if user_deks:
+        user_id = None
+        if table in ("users",):
+            user_id = str(decrypted_row.get("id") or "")
+        elif table in ("receipts", "conversations"):
+            user_id = str(decrypted_row.get("user_id") or "")
+        elif table == "chat_messages":
+            conv_id = str(decrypted_row.get("conversation_id") or "")
+            if conv_user_map and conv_id in conv_user_map:
+                user_id = conv_user_map[conv_id]
+        if user_id:
+            dek = user_deks.get(user_id)
 
     if table == "receipts":
         raw = decrypted_row.get("receipt")
         if raw is not None:
             try:
-                decrypted_row["receipt"] = crypto.safe_decrypt_json(
-                    raw, context="receipts.receipt", fallback=raw
-                )
+                if enc_version == 1 and dek is not None:
+                    decrypted_row["receipt"] = crypto.safe_decrypt_json_with_dek(
+                        raw, dek, context="receipts.receipt", fallback=raw
+                    )
+                else:
+                    decrypted_row["receipt"] = crypto.safe_decrypt_json(
+                        raw, context="receipts.receipt", fallback=raw
+                    )
             except Exception as e:
                 decrypted_row["receipt_decryption_error"] = str(e)
 
@@ -127,9 +155,14 @@ def decrypt_row(table: str, row: dict[str, Any], crypto: CryptoEngine) -> dict[s
         raw = decrypted_row.get("title")
         if raw is not None:
             try:
-                decrypted_row["title"] = crypto.safe_decrypt_text(
-                    raw, context="conversations.title", fallback=raw
-                )
+                if enc_version == 1 and dek is not None:
+                    decrypted_row["title"] = crypto.safe_decrypt_text_with_dek(
+                        raw, dek, context="conversations.title", fallback=raw
+                    )
+                else:
+                    decrypted_row["title"] = crypto.safe_decrypt_text(
+                        raw, context="conversations.title", fallback=raw
+                    )
             except Exception as e:
                 decrypted_row["title_decryption_error"] = str(e)
 
@@ -137,11 +170,73 @@ def decrypt_row(table: str, row: dict[str, Any], crypto: CryptoEngine) -> dict[s
         raw = decrypted_row.get("content")
         if raw is not None:
             try:
-                decrypted_row["content"] = crypto.safe_decrypt_text(
-                    raw, context="chat_messages.content", fallback=raw
-                )
+                if enc_version == 1 and dek is not None:
+                    decrypted_row["content"] = crypto.safe_decrypt_text_with_dek(
+                        raw, dek, context="chat_messages.content", fallback=raw
+                    )
+                else:
+                    decrypted_row["content"] = crypto.safe_decrypt_text(
+                        raw, context="chat_messages.content", fallback=raw
+                    )
             except Exception as e:
                 decrypted_row["content_decryption_error"] = str(e)
+
+    elif table == "users":
+        raw_cats = decrypted_row.get("custom_categories")
+        if raw_cats is not None:
+            try:
+                if enc_version == 1 and dek is not None:
+                    decrypted_row["custom_categories"] = crypto.safe_decrypt_json_with_dek(
+                        raw_cats, dek, context="users.custom_categories", fallback=raw_cats
+                    )
+                else:
+                    decrypted_row["custom_categories"] = crypto.safe_decrypt_json(
+                        raw_cats, context="users.custom_categories", fallback=raw_cats
+                    )
+            except Exception as e:
+                decrypted_row["custom_categories_decryption_error"] = str(e)
+
+        raw_prefs = decrypted_row.get("preferences")
+        if raw_prefs is not None:
+            try:
+                if enc_version == 1 and dek is not None:
+                    decrypted_row["preferences"] = crypto.safe_decrypt_json_with_dek(
+                        raw_prefs, dek, context="users.preferences", fallback=raw_prefs
+                    )
+                else:
+                    decrypted_row["preferences"] = crypto.safe_decrypt_json(
+                        raw_prefs, context="users.preferences", fallback=raw_prefs
+                    )
+            except Exception as e:
+                decrypted_row["preferences_decryption_error"] = str(e)
+
+        raw_cc = decrypted_row.get("country_code")
+        if raw_cc is not None:
+            try:
+                if enc_version == 1 and dek is not None:
+                    decrypted_row["country_code"] = crypto.safe_decrypt_text_with_dek(
+                        raw_cc, dek, context="users.country_code", fallback=raw_cc
+                    )
+                else:
+                    decrypted_row["country_code"] = crypto.safe_decrypt_text(
+                        raw_cc, context="users.country_code", fallback=raw_cc
+                    )
+            except Exception as e:
+                decrypted_row["country_code_decryption_error"] = str(e)
+
+        raw_mob = decrypted_row.get("mobile_number")
+        if raw_mob is not None:
+            try:
+                if enc_version == 1 and dek is not None:
+                    decrypted_row["mobile_number"] = crypto.safe_decrypt_text_with_dek(
+                        raw_mob, dek, context="users.mobile_number", fallback=raw_mob
+                    )
+                else:
+                    decrypted_row["mobile_number"] = crypto.safe_decrypt_text(
+                        raw_mob, context="users.mobile_number", fallback=raw_mob
+                    )
+            except Exception as e:
+                decrypted_row["mobile_number_decryption_error"] = str(e)
 
     return decrypted_row
 
@@ -181,6 +276,8 @@ def export_table_to_csv(
     output_dir: str,
     decrypt: bool,
     crypto: Optional[CryptoEngine],
+    user_deks: Optional[dict[str, bytes]] = None,
+    conv_user_map: Optional[dict[str, str]] = None,
 ) -> tuple[str, int, str]:
     """Write table rows to a CSV file and return (filepath, row_count, sha256)."""
     os.makedirs(output_dir, exist_ok=True)
@@ -197,7 +294,15 @@ def export_table_to_csv(
     processed_rows: list[dict[str, Any]] = []
     if decrypt and crypto:
         for r in rows:
-            processed_rows.append(decrypt_row(table, r, crypto))
+            processed_rows.append(
+                decrypt_row(
+                    table,
+                    r,
+                    crypto,
+                    user_deks=user_deks,
+                    conv_user_map=conv_user_map,
+                )
+            )
     else:
         processed_rows = rows
 
@@ -302,8 +407,10 @@ def main() -> None:
 
     client = create_client(url, key)
 
-    # Initialize CryptoEngine if decrypt requested
+    # Initialize CryptoEngine and load user DEKs if decrypt requested
     crypto: Optional[CryptoEngine] = None
+    user_deks: dict[str, bytes] = {}
+    conv_user_map: dict[str, str] = {}
     if args.decrypt:
         enc_key = (args.data_encryption_key or default_enc_key or "").strip()
         if not enc_key:
@@ -315,6 +422,36 @@ def main() -> None:
         print("\n⚠️  WARNING: --decrypt mode active. Exported CSVs will contain UNENCRYPTED")
         print("   personal receipts, merchant names, and private user messages.")
         print("   Treat the destination folder as strictly confidential.\n")
+
+        # Load per-user DEKs from user_keys table
+        try:
+            print("🔑 Loading and unwrapping user DEKs from user_keys...", end=" ", flush=True)
+            kv = KeyVault(kek=crypto._key_bytes)
+            keys_res = client.table("user_keys").select("user_id, encrypted_dek").execute()
+            key_rows = keys_res.data or []
+            for kr in key_rows:
+                u_id = kr.get("user_id")
+                enc_dek = kr.get("encrypted_dek")
+                if u_id and enc_dek:
+                    try:
+                        user_deks[str(u_id)] = kv.unwrap_dek(enc_dek)
+                    except Exception as dek_err:
+                        print(f"\n   [Warning] Failed to unwrap DEK for user {u_id}: {dek_err}")
+            print(f"[OK] Loaded {len(user_deks)} DEKs.")
+        except Exception as exc:
+            print(f"[Warning] Could not load user_keys: {exc}")
+
+        # If chat_messages is among target tables, build conversation_id -> user_id map
+        if "chat_messages" in args.tables:
+            try:
+                convs_res = client.table("conversations").select("id, user_id").execute()
+                for c in (convs_res.data or []):
+                    c_id = c.get("id")
+                    u_id = c.get("user_id")
+                    if c_id and u_id:
+                        conv_user_map[str(c_id)] = str(u_id)
+            except Exception as exc:
+                print(f"[Warning] Could not load conversation mappings: {exc}")
 
     # Resolve output directory
     if args.output_dir:
@@ -366,6 +503,8 @@ def main() -> None:
                     output_dir=target_dir,
                     decrypt=args.decrypt,
                     crypto=crypto,
+                    user_deks=user_deks,
+                    conv_user_map=conv_user_map,
                 )
                 file_size = os.path.getsize(filepath) if os.path.exists(filepath) else 0
                 print(f"[OK] Wrote {written_count} rows ({file_size:,} bytes)")

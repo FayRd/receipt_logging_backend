@@ -145,8 +145,8 @@ def test_full_account_deletion_crypto_shredding_pipeline(client, mock_user_sessi
         assert u["mobile_number"] is None
         assert u["deleted_at"] is not None
         user_prefs = u.get("preferences") or {}
-        assert "trial_device_id" not in user_prefs, "trial_device_id must be stripped from preferences on deletion"
-        assert user_prefs.get("theme") == "dark", "Non-PII preferences must be preserved"
+        assert user_prefs == {}, "All preferences wiped on deletion"
+        assert u.get("custom_categories") in ([], None), "Custom categories wiped on deletion"
 
         # Audit log verification
         audit_res = await db.table("deletion_audit_log").select("*").eq("user_id", user_id).execute()

@@ -2,7 +2,8 @@ import base64
 import uuid
 from supabase import AsyncClient
 from src.Infrastructure.logger import get_logger
-from src.Infrastructure.crypto import get_crypto_engine
+from src.Infrastructure.crypto import get_crypto_engine, encrypt_json_with_dek
+from src.Infrastructure.key_vault import get_key_vault
 from src.Services.image_service import ImageStorageService
 
 logger = get_logger("Services.data_migration_service")
@@ -207,10 +208,21 @@ class DataMigrationService:
         custom_categories = migrate_data.get("custom_categories", []) or []
         if custom_categories:
             try:
-                user_res = await db.table("users").select("custom_categories").eq("id", user_id).maybe_single().execute()
+                user_res = await db.table("users").select("custom_categories, enc_version").eq("id", user_id).maybe_single().execute()
                 current_cats = user_res.data.get("custom_categories") if user_res and user_res.data else None
                 if not current_cats:
-                    await db.table("users").update({"custom_categories": custom_categories}).eq("id", user_id).execute()
+                    key_vault = get_key_vault()
+                    dek = await key_vault.get_user_dek_or_none(user_id, db)
+                    if not dek:
+                        dek = await key_vault.provision_user_dek(user_id, db)
+
+                    if dek:
+                        enc_cats = encrypt_json_with_dek(custom_categories, dek)
+                        await db.table("users").update({"custom_categories": enc_cats, "enc_version": 1}).eq("id", user_id).execute()
+                    else:
+                        enc_cats = crypto.encrypt_json(custom_categories)
+                        await db.table("users").update({"custom_categories": enc_cats}).eq("id", user_id).execute()
+
                     migrated["custom_categories"] = len(custom_categories)
                     logger.info("Migrated %d custom_categories for user_id=%s", len(custom_categories), user_id)
             except Exception as exc:
@@ -227,4 +239,7 @@ class DataMigrationService:
             migrated.get("custom_categories", 0),
         )
         return migrated
+
+    # Alias for migrate_user_data
+    migrate_guest_data = migrate_user_data
 

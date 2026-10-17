@@ -326,8 +326,9 @@ async def _download_and_upload_google_avatar(
     user_id: str,
     picture_url: str | None,
     image_storage: ImageStorageService,
+    dek: bytes | None = None,
 ) -> str | None:
-    """Download Google profile picture binary and store in Supabase Storage in 3 resolutions."""
+    """Download Google profile picture binary and store in Supabase Storage in 3 resolutions (encrypted with DEK)."""
     if not picture_url or not picture_url.startswith("http"):
         return None
     try:
@@ -338,11 +339,13 @@ async def _download_and_upload_google_avatar(
                     user_id=user_id,
                     image_bytes=resp.content,
                     target_max_bytes=_settings.max_compressed_image_bytes,
+                    dek=dek,
                 )
                 logger.info(
-                    "google_auth: ingested Google avatar to object storage -> %s for user_id=%s",
+                    "google_auth: ingested Google avatar to object storage -> %s for user_id=%s (encrypted with DEK=%s)",
                     folder_path,
                     user_id,
+                    dek is not None,
                 )
                 return folder_path
             else:
@@ -380,17 +383,20 @@ async def _handle_google_unverified_claim(
     logger.info("google_auth: claiming unverified account id=%s with google_id=%s", user_by_email.get("id"), google_id)
     claimed_user = await repo.claim_unverified_account_with_google(user_by_email["id"], google_id)
     claimed_user.pop("password", None)
+    user_dek: bytes | None = None
     try:
-        key_vault = get_key_vault()
-        await key_vault.provision_user_dek(str(claimed_user["id"]), repo.db)
+        kv = get_key_vault()
+        await kv.provision_user_dek(str(claimed_user["id"]), repo.db)
+        user_dek = await kv.get_user_dek_or_none(str(claimed_user["id"]), repo.db)
     except Exception as exc:
-        logger.error("Failed to provision DEK for claimed Google user %s: %s", claimed_user.get("id"), exc)
+        logger.error("Failed to provision/load DEK for claimed Google user %s: %s", claimed_user.get("id"), exc)
 
     if not claimed_user.get("avatar_image_path") and picture:
         avatar_folder = await _download_and_upload_google_avatar(
             user_id=claimed_user["id"],
             picture_url=picture,
             image_storage=image_storage,
+            dek=user_dek,
         )
         if avatar_folder:
             await repo.update_profile(
@@ -541,11 +547,21 @@ async def google_auth(
     )
     new_user.pop("password", None)
 
+    # Provision user DEK first so avatar images can be encrypted with per-user DEK
+    user_dek: bytes | None = None
+    try:
+        kv = get_key_vault()
+        await kv.provision_user_dek(str(new_user["id"]), repo.db)
+        user_dek = await kv.get_user_dek_or_none(str(new_user["id"]), repo.db)
+    except Exception as exc:
+        logger.error("Failed to provision/load DEK for new Google user %s: %s", new_user.get("id"), exc)
+
     # Ingest Google profile picture into Supabase Object Storage
     avatar_folder = await _download_and_upload_google_avatar(
         user_id=new_user["id"],
         picture_url=picture,
         image_storage=image_storage,
+        dek=user_dek,
     )
     if avatar_folder:
         await repo.update_profile(
@@ -555,11 +571,6 @@ async def google_auth(
         new_user["avatar_image_path"] = avatar_folder
 
     logger.info("google_auth: successfully registered user_id=%s, username=%s via Google (avatar=%s)", new_user.get("id"), clean_username, new_user.get("avatar_image_path"))
-    try:
-        key_vault = get_key_vault()
-        await key_vault.provision_user_dek(str(new_user["id"]), repo.db)
-    except Exception as exc:
-        logger.error("Failed to provision DEK for new Google user %s: %s", new_user.get("id"), exc)
 
     access_token = create_access_token(user_id=new_user["id"], username=new_user["username"])
     refresh_token = create_refresh_token(user_id=new_user["id"], username=new_user["username"])
@@ -756,7 +767,14 @@ async def get_my_avatar(
     Supports size="small" (128x128), size="medium" (256x256), size="large" (512x512).
     """
     logger.debug("Entering get_my_avatar: user_id=%s, size=%s", identity.user_id, size)
-    data = await image_storage.download_avatar(user_id=identity.user_id, size=size)
+    dek: bytes | None = None
+    if identity.user_id:
+        try:
+            dek = await key_vault.get_user_dek_or_none(identity.user_id, image_storage.db)
+        except Exception as e:
+            logger.warning("Could not load DEK for user %s when retrieving avatar: %s", identity.user_id, e)
+
+    data = await image_storage.download_avatar(user_id=identity.user_id, size=size, dek=dek)
     if not data:
         raise HTTPException(status_code=404, detail="Avatar image not found.")
     return Response(
@@ -990,10 +1008,18 @@ async def update_my_profile(
     if avatar_bytes and len(avatar_bytes) > 0:
         validate_image_size(avatar_bytes, max_bytes=_settings.max_upload_size_bytes)
 
+        dek: bytes | None = None
+        if identity.user_id:
+            try:
+                dek = await key_vault.get_user_dek_or_none(identity.user_id, repo.db)
+            except Exception as e:
+                logger.warning("Could not load DEK for user %s when uploading avatar: %s", identity.user_id, e)
+
         folder_path = await image_storage.upload_avatar(
             user_id=identity.user_id,
             image_bytes=avatar_bytes,
             target_max_bytes=_settings.max_compressed_image_bytes,
+            dek=dek,
         )
         update_req = UserUpdateRequest(
             email=update_req.email,
@@ -1004,9 +1030,10 @@ async def update_my_profile(
             preferences=update_req.preferences,
         )
         logger.info(
-            "update_my_profile: avatar uploaded → %s for user_id=%s",
+            "update_my_profile: avatar uploaded → %s for user_id=%s (encrypted with DEK=%s)",
             folder_path,
             identity.user_id,
+            dek is not None,
         )
 
     updated = await repo.update_profile(identity.user_id, update_req)

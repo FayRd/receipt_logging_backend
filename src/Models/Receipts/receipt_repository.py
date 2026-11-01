@@ -5,7 +5,9 @@ from supabase import AsyncClient
 from src.Infrastructure.logger import get_logger
 from src.Infrastructure.crypto import get_crypto_engine
 from src.Infrastructure.key_vault import get_key_vault
+import asyncio
 from src.Models.schemas import Receipt
+from src.Services.currency_rate_service import fetch_rate_for_date, parse_receipt_date
 from src.Auth.identity import Identity
 
 logger = get_logger("Models.receipt_repository")
@@ -75,6 +77,11 @@ class ReceiptRepository:
 
             response = await query.execute()
             rows = response.data if response else []
+            if receipt.currency_rate_at_receipt_date is None:
+                rate = await fetch_rate_for_date(receipt.currency, receipt.date)
+                if rate is not None:
+                    receipt.currency_rate_at_receipt_date = rate
+
             dek: bytes | None = None
             if identity.user_id:
                 dek = await self.key_vault.get_user_dek_or_none(identity.user_id, self.db)
@@ -180,6 +187,11 @@ class ReceiptRepository:
             receipt.merchant_name,
         )
         try:
+            if receipt.currency_rate_at_receipt_date is None:
+                rate = await fetch_rate_for_date(receipt.currency, receipt.date)
+                if rate is not None:
+                    receipt.currency_rate_at_receipt_date = rate
+
             dek: bytes | None = None
             if identity.user_id:
                 dek = await self.key_vault.get_user_dek_or_none(identity.user_id, self.db)
@@ -250,6 +262,15 @@ class ReceiptRepository:
             identity.device_id,
         )
         try:
+            async def _enrich_rate(r: Receipt):
+                if r.currency_rate_at_receipt_date is None:
+                    rate = await fetch_rate_for_date(r.currency, r.date)
+                    if rate is not None:
+                        r.currency_rate_at_receipt_date = rate
+
+            if receipts:
+                await asyncio.gather(*[_enrich_rate(r) for r in receipts], return_exceptions=True)
+
             dek: bytes | None = None
             if identity.user_id:
                 dek = await self.key_vault.get_user_dek_or_none(identity.user_id, self.db)
@@ -322,6 +343,19 @@ class ReceiptRepository:
         if receipt.tax_amount is None and existing_rec.get("tax_amount") is not None:
             receipt.tax_amount = existing_rec.get("tax_amount")
 
+        existing_date = existing_rec.get("date")
+        existing_rate = existing_rec.get("currency_rate_at_receipt_date")
+
+        date_changed = False
+        if receipt.date and existing_date:
+            date_changed = (parse_receipt_date(receipt.date) != parse_receipt_date(existing_date))
+
+        if not date_changed and existing_rate is not None and receipt.currency_rate_at_receipt_date is None:
+            receipt.currency_rate_at_receipt_date = existing_rate
+        elif date_changed:
+            rate = await fetch_rate_for_date(receipt.currency, receipt.date)
+            receipt.currency_rate_at_receipt_date = rate
+
     async def update(
         self,
         receipt_id: str,
@@ -350,6 +384,10 @@ class ReceiptRepository:
 
             if receipt is not None:
                 await self._preserve_existing_fields(receipt_id, identity, receipt)
+                if receipt.currency_rate_at_receipt_date is None:
+                    rate = await fetch_rate_for_date(receipt.currency, receipt.date)
+                    if rate is not None:
+                        receipt.currency_rate_at_receipt_date = rate
                 enc_version = 1 if (identity.user_id and dek is not None) else 0
                 if dek is not None:
                     updates["receipt"] = self.crypto.encrypt_json_with_dek(receipt.model_dump(mode="json"), dek)

@@ -24,6 +24,8 @@ CREATE TABLE IF NOT EXISTS users (
     mobile_verified_at TIMESTAMPTZ,
     tier user_tier NOT NULL DEFAULT 'free',
     is_2fa_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    enc_version SMALLINT NOT NULL DEFAULT 0,
+    mobile_hash TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     deleted_at TIMESTAMPTZ
@@ -42,6 +44,18 @@ BEGIN
         WHERE table_name = 'users' AND column_name = 'is_2fa_enabled'
     ) THEN
         ALTER TABLE users ADD COLUMN is_2fa_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'users' AND column_name = 'enc_version'
+    ) THEN
+        ALTER TABLE users ADD COLUMN enc_version SMALLINT NOT NULL DEFAULT 0;
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_name = 'users' AND column_name = 'mobile_hash'
+    ) THEN
+        ALTER TABLE users ADD COLUMN mobile_hash TEXT;
     END IF;
     ALTER TABLE users ALTER COLUMN password DROP NOT NULL;
 END $$;

@@ -121,7 +121,7 @@ class KeyVault:
             logger.debug("get_user_dek_or_none: user %s has no DEK: %s", user_id, exc)
             return None
 
-    async def provision_user_dek(self, user_id: str, db: AsyncClient) -> bytes:
+    async def provision_user_dek(self, user_id: str, db: AsyncClient, dek: bytes | None = None) -> bytes:
         """Provision a new DEK for user_id in user_keys if not present (idempotent)."""
         uid = str(user_id).strip()
         if not uid:
@@ -131,7 +131,8 @@ class KeyVault:
         if existing is not None:
             return existing
 
-        dek = self.generate_dek()
+        if dek is None:
+            dek = self.generate_dek()
         wrapped = self.wrap_dek(dek)
         now = datetime.now(timezone.utc).isoformat()
         row = {

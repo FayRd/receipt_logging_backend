@@ -71,6 +71,12 @@ def scrub_users_csv(user_id: str, backup_root: Optional[str] = None) -> int:
                             row["country_code"] = ""
                         if "mobile_number" in row:
                             row["mobile_number"] = ""
+                        if "mobile_hash" in row:
+                            row["mobile_hash"] = ""
+                        if "custom_categories" in row:
+                            row["custom_categories"] = "[]"
+                        if "preferences" in row:
+                            row["preferences"] = "{}"
                         if "avatar_image_path" in row:
                             row["avatar_image_path"] = ""
                         if "deleted_at" in row and not row["deleted_at"]:

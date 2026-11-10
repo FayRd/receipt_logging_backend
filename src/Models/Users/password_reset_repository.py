@@ -7,6 +7,8 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from supabase import AsyncClient
 from postgrest.exceptions import APIError
+from src.Infrastructure.crypto import get_crypto_engine
+from src.Infrastructure.key_vault import get_key_vault
 from src.Infrastructure.logger import get_logger
 
 logger = get_logger("Models.password_reset")
@@ -23,6 +25,8 @@ class PasswordResetRepository:
 
     def __init__(self, db: AsyncClient):
         self.db = db
+        self.crypto = get_crypto_engine()
+        self.key_vault = get_key_vault()
 
     def hash_otp(self, otp: str) -> str:
         """Hash numeric OTP with static salt using SHA-256."""
@@ -206,17 +210,29 @@ class PasswordResetRepository:
 
         # Update user's password and preferences['password_changed_at'] in users table
         try:
+            dek = await self.key_vault.get_user_dek_or_none(user_id, self.db)
             user_res = await (
                 self.db.table(self.USERS_TABLE)
-                .select("preferences")
+                .select("preferences, enc_version")
                 .eq("id", user_id)
                 .maybe_single()
                 .execute()
             )
             raw_prefs = (user_res.data.get("preferences") if user_res and user_res.data else {}) or {}
-            if isinstance(raw_prefs, str):
+            if isinstance(raw_prefs, dict) and raw_prefs.get("_enc") in self.crypto.SUPPORTED_VERSIONS:
+                if dek:
+                    prefs = self.crypto.safe_decrypt_json_with_dek(raw_prefs, dek, context="users.preferences", fallback={})
+                else:
+                    prefs = self.crypto.safe_decrypt_json(raw_prefs, context="users.preferences", fallback={})
+            elif isinstance(raw_prefs, str):
                 try:
-                    prefs = json.loads(raw_prefs)
+                    parsed = json.loads(raw_prefs)
+                    if isinstance(parsed, dict) and parsed.get("_enc") in self.crypto.SUPPORTED_VERSIONS:
+                        prefs = self.crypto.safe_decrypt_json_with_dek(parsed, dek, context="users.preferences", fallback={}) if dek else self.crypto.safe_decrypt_json(parsed, context="users.preferences", fallback={})
+                    elif isinstance(parsed, dict):
+                        prefs = parsed
+                    else:
+                        prefs = {}
                 except Exception:
                     prefs = {}
             elif isinstance(raw_prefs, dict):
@@ -224,10 +240,22 @@ class PasswordResetRepository:
             else:
                 prefs = {}
 
+            if not isinstance(prefs, dict):
+                prefs = {}
+
             prefs["password_changed_at"] = now
+
+            if not dek:
+                dek = await self.key_vault.provision_user_dek(user_id, self.db)
+
+            enc_prefs = self.crypto.encrypt_json_with_dek(prefs, dek) if dek else self.crypto.encrypt_json(prefs)
+            update_payload = {"password": new_password_hash, "preferences": enc_prefs}
+            if dek:
+                update_payload["enc_version"] = 1
+
             await (
                 self.db.table(self.USERS_TABLE)
-                .update({"password": new_password_hash, "preferences": prefs})
+                .update(update_payload)
                 .eq("id", user_id)
                 .execute()
             )

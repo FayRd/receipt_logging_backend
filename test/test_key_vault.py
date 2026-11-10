@@ -641,3 +641,63 @@ async def test_image_service_dek_encryption():
     downloaded = await image_service.download_receipt_image(storage_path, dek=user_dek)
     assert downloaded is not None
     assert downloaded.startswith(b"\xff\xd8")
+
+
+@pytest.mark.anyio
+async def test_image_service_avatar_dek_encryption():
+    import io
+    from PIL import Image
+    user_id = "test-user-avatar-dek"
+    user_dek = os.urandom(32)
+
+    img = Image.new("RGB", (200, 200), color=(100, 150, 200))
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG")
+    dummy_jpeg = buf.getvalue()
+
+    uploaded_files: dict[str, bytes] = {}
+
+    mock_db = MagicMock()
+    mock_storage = MagicMock()
+    mock_bucket = MagicMock()
+
+    async def mock_upload(path, file, file_options=None):
+        uploaded_files[path] = file
+
+    async def mock_download(path):
+        return uploaded_files.get(path)
+
+    mock_bucket.upload = mock_upload
+    mock_bucket.download = mock_download
+    mock_storage.from_ = lambda bucket_name: mock_bucket
+    mock_db.storage = mock_storage
+
+    image_service = ImageStorageService(mock_db, bucket="user-data")
+
+    # 1. Upload avatar with user DEK (creates small, medium, large)
+    folder_path = await image_service.upload_avatar(
+        user_id=user_id,
+        image_bytes=dummy_jpeg,
+        dek=user_dek,
+    )
+    assert folder_path == f"{user_id}/avatar_images"
+
+    for size_file in ["small.jpg", "medium.jpg", "large.jpg"]:
+        storage_path = f"{user_id}/avatar_images/{size_file}"
+        assert storage_path in uploaded_files
+        uploaded_encrypted_bytes = uploaded_files[storage_path]
+        assert uploaded_encrypted_bytes.startswith(b"ENC:V1:")
+        # Direct decryption with DEK recovers valid JPEG magic bytes
+        decrypted_raw = decrypt_bytes_with_dek(uploaded_encrypted_bytes, user_dek)
+        assert decrypted_raw.startswith(b"\xff\xd8")
+
+    # 2. Download each avatar resolution with DEK
+    for size_name in ["small", "medium", "large"]:
+        downloaded = await image_service.download_avatar(user_id=user_id, size=size_name, dek=user_dek)
+        assert downloaded is not None
+        assert downloaded.startswith(b"\xff\xd8")
+
+    # 3. Download with wrong DEK should return None (InvalidTag handled defensively)
+    wrong_dek = os.urandom(32)
+    downloaded_wrong = await image_service.download_avatar(user_id=user_id, size="medium", dek=wrong_dek)
+    assert downloaded_wrong is None

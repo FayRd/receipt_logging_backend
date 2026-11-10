@@ -215,32 +215,42 @@ class ImageStorageService:
         user_id: str,
         image_bytes: bytes,
         target_max_bytes: int = 5 * 1024 * 1024,
+        dek: bytes | None = None,
     ) -> str:
-        """Compress and upload 3 avatar resolutions to {user_id}/avatar_images/.
+        """Compress and encrypt 3 avatar resolutions with AES-256-GCM to {user_id}/avatar_images/.
 
+        If `dek` is provided, encrypts with the per-user DEK; otherwise falls back to global key.
         Returns the folder path "{user_id}/avatar_images" for storage in users.avatar_image_path.
         """
         resolutions = generate_avatar_resolutions(image_bytes, target_max_bytes=target_max_bytes)
 
         for filename, data in resolutions.items():
+            if dek is not None:
+                encrypted_data = self.crypto.encrypt_bytes_with_dek(data, dek)
+            else:
+                encrypted_data = self.crypto.encrypt_bytes(data)
+
             path = f"{user_id}/avatar_images/{filename}"
             logger.debug(
-                "ImageStorageService.upload_avatar: uploading %s (%d bytes) to bucket=%s",
+                "ImageStorageService.upload_avatar: uploading %s (%d raw -> %d encrypted bytes, per_user_dek=%s) to bucket=%s",
                 path,
                 len(data),
+                len(encrypted_data),
+                dek is not None,
                 self.bucket,
             )
             await self.db.storage.from_(self.bucket).upload(
                 path=path,
-                file=data,
+                file=encrypted_data,
                 file_options={"content-type": "image/jpeg", "upsert": "true"},
             )
 
         folder_path = f"{user_id}/avatar_images"
         logger.info(
-            "ImageStorageService.upload_avatar: all 3 resolutions uploaded for user_id=%s → %s",
+            "ImageStorageService.upload_avatar: all 3 resolutions uploaded encrypted for user_id=%s → %s (per_user_dek=%s)",
             user_id,
             folder_path,
+            dek is not None,
         )
         return folder_path
 
@@ -286,8 +296,16 @@ class ImageStorageService:
         )
         return path
 
-    async def download_avatar(self, user_id: str, size: str = "medium") -> bytes | None:
-        """Download an avatar resolution JPEG from {user_id}/avatar_images/{size}.jpg."""
+    async def download_avatar(
+        self,
+        user_id: str,
+        size: str = "medium",
+        dek: bytes | None = None,
+    ) -> bytes | None:
+        """Download and decrypt an avatar resolution JPEG from {user_id}/avatar_images/{size}.jpg.
+
+        If `dek` is provided, decrypts using per-user DEK (with fallback to global key).
+        """
         size_key = size.lower().strip()
         if not size_key.endswith(".jpg"):
             size_filename = f"{size_key}.jpg"
@@ -303,8 +321,18 @@ class ImageStorageService:
                 path,
                 self.bucket,
             )
-            data = await self.db.storage.from_(self.bucket).download(path)
-            return data
+            raw_data = await self.db.storage.from_(self.bucket).download(path)
+            if raw_data:
+                if dek is not None:
+                    decrypted = self.crypto.safe_decrypt_bytes_with_dek(
+                        raw_data, dek, context=f"avatar:{path}"
+                    )
+                else:
+                    decrypted = self.crypto.safe_decrypt_bytes(
+                        raw_data, context=f"avatar:{path}"
+                    )
+                return decrypted
+            return None
         except Exception as e:
             logger.warning(
                 "ImageStorageService.download_avatar: avatar not found at %s: %s",

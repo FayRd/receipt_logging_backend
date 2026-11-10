@@ -1,16 +1,21 @@
 import hashlib
 import time
+import uuid
 from datetime import datetime, timezone, timedelta
+from typing import Any
 from fastapi import HTTPException
 from postgrest.exceptions import APIError
 from supabase import AsyncClient
+from src.Infrastructure.crypto import get_crypto_engine, compute_mobile_hash
+from src.Infrastructure.key_vault import get_key_vault
 from src.Infrastructure.logger import get_logger
 from src.Models.schemas import UserCreateRequest, UserUpdateRequest
+from src.config import get_settings
 
 logger = get_logger("Models.user_repository")
 
 # Columns returned in all sanitized (non-auth) user fetches
-_USER_SAFE_COLUMNS = "id, username, email, google_id, country_code, mobile_number, avatar_image_path, custom_categories, preferences, email_verified_at, mobile_verified_at, tier, is_2fa_enabled, created_at, deleted_at"
+_USER_SAFE_COLUMNS = "id, username, email, google_id, country_code, mobile_number, mobile_hash, avatar_image_path, custom_categories, preferences, email_verified_at, mobile_verified_at, tier, is_2fa_enabled, enc_version, created_at, deleted_at"
 
 
 
@@ -38,6 +43,89 @@ class UserRepository:
 
     def __init__(self, db: AsyncClient):
         self.db = db
+        self.crypto = get_crypto_engine()
+        self.key_vault = get_key_vault()
+
+    def _decrypt_json_field(self, val: Any, dek: bytes | None, context: str, fallback: Any) -> Any:
+        if isinstance(val, dict) and val.get("_enc") in self.crypto.SUPPORTED_VERSIONS:
+            if dek:
+                return self.crypto.safe_decrypt_json_with_dek(val, dek, context=context, fallback=fallback)
+            return self.crypto.safe_decrypt_json(val, context=context, fallback=fallback)
+        return val if val is not None else fallback
+
+    def _decrypt_text_field(self, val: Any, dek: bytes | None, context: str) -> str | None:
+        if isinstance(val, str) and (val.startswith(self.crypto.TEXT_PREFIX) or val.startswith("enc:")):
+            if dek:
+                return self.crypto.safe_decrypt_text_with_dek(val, dek, context=context, fallback=None)
+            return self.crypto.safe_decrypt_text(val, context=context, fallback=None)
+        return val
+
+    def _encrypt_json_field(self, val: Any, dek: bytes | None) -> Any:
+        if val is None:
+            return None
+        return self.crypto.encrypt_json_with_dek(val, dek) if dek else self.crypto.encrypt_json(val)
+
+    def _encrypt_text_field(self, val: str | None, dek: bytes | None) -> str | None:
+        if val is None:
+            return None
+        return self.crypto.encrypt_text_with_dek(val, dek) if dek else self.crypto.encrypt_text(val)
+
+    async def _decrypt_user_row(self, user: dict | None) -> dict | None:
+        """Transparently decrypts encrypted user columns (custom_categories, preferences, country_code, mobile_number).
+        Uses per-user DEK when enc_version=1, or falls back to global KEK when enc_version=0.
+        Strips internal blind index mobile_hash from the returned payload.
+        """
+        if not user:
+            return None
+        res = dict(user)
+        user_id = str(res.get("id") or "").strip()
+        enc_version = res.get("enc_version") or 0
+
+        dek = None
+        if enc_version == 1 and user_id:
+            dek = await self.key_vault.get_user_dek_or_none(user_id, self.db)
+
+        cats = self._decrypt_json_field(res.get("custom_categories"), dek, "users.custom_categories", [])
+        res["custom_categories"] = cats if isinstance(cats, list) else []
+
+        prefs = self._decrypt_json_field(res.get("preferences"), dek, "users.preferences", {})
+        res["preferences"] = prefs if isinstance(prefs, dict) else {}
+
+        res["country_code"] = self._decrypt_text_field(res.get("country_code"), dek, "users.country_code")
+        res["mobile_number"] = self._decrypt_text_field(res.get("mobile_number"), dek, "users.mobile_number")
+
+        res.pop("mobile_hash", None)
+        return res
+
+    def _encrypt_user_fields(self, data: dict, dek: bytes | None) -> tuple[dict, int]:
+        """Encrypts custom_categories, preferences, country_code, mobile_number using DEK if available (else global key).
+        Computes mobile_hash if mobile_number in data. Sets enc_version = 1 if dek else 0.
+        """
+        payload = dict(data)
+        enc_version = 1 if dek else 0
+        settings = get_settings()
+
+        if "custom_categories" in payload and payload["custom_categories"] is not None:
+            payload["custom_categories"] = self._encrypt_json_field(payload["custom_categories"], dek)
+
+        if "preferences" in payload and payload["preferences"] is not None:
+            payload["preferences"] = self._encrypt_json_field(payload["preferences"], dek)
+
+        if "country_code" in payload and payload["country_code"] is not None:
+            payload["country_code"] = self._encrypt_text_field(payload["country_code"], dek)
+
+        if "mobile_number" in payload:
+            mn = payload["mobile_number"]
+            if mn is not None:
+                payload["mobile_number"] = self._encrypt_text_field(mn, dek)
+                payload["mobile_hash"] = compute_mobile_hash(mn, settings.data_encryption_key)
+            else:
+                payload["mobile_number"] = None
+                payload["mobile_hash"] = None
+
+        payload["enc_version"] = enc_version
+        return payload, enc_version
+
 
     # ── PASSWORD HASHING ──────────────────────────────────────────────────────
     # This is a pure CPU operation — intentionally kept sync (no I/O).
@@ -72,7 +160,7 @@ class UserRepository:
             result = res.data if res else None
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info("SELECT user get_by_username finished: found=%s in %.2fms", result is not None, duration_ms)
-            return result
+            return await self._decrypt_user_row(result)
         except Exception as e:
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.error("Database error in SELECT user get_by_username '%s' after %.2fms: %s", clean_user, duration_ms, e, exc_info=True)
@@ -95,7 +183,7 @@ class UserRepository:
             result = res.data if res else None
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info("SELECT user get_by_google_id finished: found=%s in %.2fms", result is not None, duration_ms)
-            return result
+            return await self._decrypt_user_row(result)
         except Exception as e:
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.error("Database error in SELECT user get_by_google_id '%s' after %.2fms: %s", clean_gid, duration_ms, e, exc_info=True)
@@ -118,7 +206,7 @@ class UserRepository:
             if res and res.data:
                 duration_ms = (time.perf_counter() - start_time) * 1000
                 logger.info("SELECT user get_by_email matched: id=%s in %.2fms", res.data.get("id"), duration_ms)
-                return res.data
+                return await self._decrypt_user_row(res.data)
 
             # Fallback to ilike if stored with mixed casing
             res_ilike = await (
@@ -132,7 +220,7 @@ class UserRepository:
             result = res_ilike.data if res_ilike else None
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info("SELECT user get_by_email ilike search finished: found=%s in %.2fms", result is not None, duration_ms)
-            return result
+            return await self._decrypt_user_row(result)
         except Exception as e:
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.error("Database error in SELECT user get_by_email '%s' after %.2fms: %s", clean_email, duration_ms, e, exc_info=True)
@@ -156,41 +244,62 @@ class UserRepository:
             if user:
                 return user
 
-            res = await (
-                self.db.table(self.TABLE)
-                .select("*")
-                .eq("mobile_number", clean)
-                .is_("deleted_at", "null")
-                .maybe_single()
-                .execute()
-            )
-            if res and res.data:
-                duration_ms = (time.perf_counter() - start_time) * 1000
-                logger.info("SELECT user get_by_email_or_mobile matched mobile: id=%s in %.2fms", res.data.get("id"), duration_ms)
-                return res.data
-
-            clean_digits = "".join(c for c in clean if c.isdigit() or c == "+")
-            if clean_digits and clean_digits != clean:
-                res_digits = await (
+            settings = get_settings()
+            target_hash = compute_mobile_hash(clean, settings.data_encryption_key)
+            if target_hash:
+                res = await (
                     self.db.table(self.TABLE)
                     .select("*")
-                    .eq("mobile_number", clean_digits)
+                    .eq("mobile_hash", target_hash)
                     .is_("deleted_at", "null")
                     .maybe_single()
                     .execute()
                 )
-                if res_digits and res_digits.data:
+                if res and res.data:
                     duration_ms = (time.perf_counter() - start_time) * 1000
-                    logger.info("SELECT user get_by_email_or_mobile matched cleaned mobile: id=%s in %.2fms", res_digits.data.get("id"), duration_ms)
-                    return res_digits.data
+                    logger.info("SELECT user get_by_email_or_mobile matched mobile_hash: id=%s in %.2fms", res.data.get("id"), duration_ms)
+                    return await self._decrypt_user_row(res.data)
 
-            duration_ms = (time.perf_counter() - start_time) * 1000
-            logger.info("SELECT user get_by_email_or_mobile: not found in %.2fms", duration_ms)
-            return None
+            # Legacy fallback: match unencrypted mobile_number
+            return await self._lookup_legacy_mobile(clean, start_time)
         except Exception as e:
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.error("Database error in SELECT user get_by_email_or_mobile after %.2fms: %s", duration_ms, e, exc_info=True)
             raise
+
+    async def _lookup_legacy_mobile(self, clean: str, start_time: float) -> dict | None:
+        """Fallback lookup for legacy unencrypted mobile_number rows."""
+        res = await (
+            self.db.table(self.TABLE)
+            .select("*")
+            .eq("mobile_number", clean)
+            .is_("deleted_at", "null")
+            .maybe_single()
+            .execute()
+        )
+        if res and res.data:
+            duration_ms = (time.perf_counter() - start_time) * 1000
+            logger.info("SELECT user get_by_email_or_mobile matched mobile: id=%s in %.2fms", res.data.get("id"), duration_ms)
+            return await self._decrypt_user_row(res.data)
+
+        clean_digits = "".join(c for c in clean if c.isdigit() or c == "+")
+        if clean_digits and clean_digits != clean:
+            res_digits = await (
+                self.db.table(self.TABLE)
+                .select("*")
+                .eq("mobile_number", clean_digits)
+                .is_("deleted_at", "null")
+                .maybe_single()
+                .execute()
+            )
+            if res_digits and res_digits.data:
+                duration_ms = (time.perf_counter() - start_time) * 1000
+                logger.info("SELECT user get_by_email_or_mobile matched cleaned mobile: id=%s in %.2fms", res_digits.data.get("id"), duration_ms)
+                return await self._decrypt_user_row(res_digits.data)
+
+        duration_ms = (time.perf_counter() - start_time) * 1000
+        logger.info("SELECT user get_by_email_or_mobile: not found in %.2fms", duration_ms)
+        return None
 
     async def get_by_id(self, user_id: str) -> dict | None:
         """Fetch a sanitized user row (no password) by UUID."""
@@ -208,7 +317,7 @@ class UserRepository:
             result = res.data if res else None
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info("SELECT user get_by_id finished: found=%s in %.2fms", result is not None, duration_ms)
-            return result
+            return await self._decrypt_user_row(result)
         except Exception as e:
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.error("Database error in SELECT user get_by_id user_id=%s after %.2fms: %s", user_id, duration_ms, e, exc_info=True)
@@ -251,23 +360,33 @@ class UserRepository:
                     prefs["trial_device_id"] = device_id
                 logger.info("Account '%s' created on Free tier; trial deferred pending email verification.", req.username)
 
+            user_id = str(uuid.uuid4())
+            dek = self.key_vault.generate_dek()
+            enc_fields, enc_ver = self._encrypt_user_fields({
+                "custom_categories": cats,
+                "preferences": prefs,
+                "country_code": req.country_code,
+                "mobile_number": req.mobile_number,
+            }, dek)
+
             row = {
+                "id": user_id,
                 "username": req.username.strip(),
                 "email": req.email.strip().lower(),
                 "password": hashed_pwd,
-                "country_code": req.country_code,
-                "mobile_number": req.mobile_number,
                 "avatar_image_path": req.avatar_image_path,
-                "custom_categories": cats,
-                "preferences": prefs,
                 "tier": tier,
+                **enc_fields,
             }
             res = await self.db.table(self.TABLE).insert(row).execute()
+            await self.key_vault.provision_user_dek(user_id, self.db, dek=dek)
+
             user_data = res.data[0]
             user_data.pop("password", None)  # Never expose the hash
+            decrypted = await self._decrypt_user_row(user_data)
             duration_ms = (time.perf_counter() - start_time) * 1000
-            logger.info("INSERT user create succeeded: id=%s, tier=%s in %.2fms", user_data.get("id"), user_data.get("tier"), duration_ms)
-            return user_data
+            logger.info("INSERT user create succeeded: id=%s, tier=%s in %.2fms", user_id, decrypted.get("tier"), duration_ms)
+            return decrypted
         except Exception as e:
             _handle_insert_conflict(e, req.username, "username")
             duration_ms = (time.perf_counter() - start_time) * 1000
@@ -313,25 +432,35 @@ class UserRepository:
                     await self.mark_device_trial_consumed(device_id)
                 logger.info("Granting 14-day reverse Premium trial to new Google user '%s'", username)
 
+            user_id = str(uuid.uuid4())
+            dek = self.key_vault.generate_dek()
+            enc_fields, enc_ver = self._encrypt_user_fields({
+                "custom_categories": [],
+                "preferences": prefs,
+                "country_code": None,
+                "mobile_number": None,
+            }, dek)
+
             row = {
+                "id": user_id,
                 "username": username.strip(),
                 "email": email.strip().lower(),
                 "password": None,
                 "google_id": google_id.strip(),
                 "email_verified_at": now.isoformat(),
-                "country_code": None,
-                "mobile_number": None,
                 "avatar_image_path": avatar_image_path,
-                "custom_categories": [],
-                "preferences": prefs,
                 "tier": tier,
+                **enc_fields,
             }
             res = await self.db.table(self.TABLE).insert(row).execute()
+            await self.key_vault.provision_user_dek(user_id, self.db, dek=dek)
+
             user_data = res.data[0]
             user_data.pop("password", None)
+            decrypted = await self._decrypt_user_row(user_data)
             duration_ms = (time.perf_counter() - start_time) * 1000
-            logger.info("INSERT google user create succeeded: id=%s, tier=%s in %.2fms", user_data.get("id"), user_data.get("tier"), duration_ms)
-            return user_data
+            logger.info("INSERT google user create succeeded: id=%s, tier=%s in %.2fms", user_id, decrypted.get("tier"), duration_ms)
+            return decrypted
         except Exception as e:
             _handle_insert_conflict(e, username, "Google ID")
             duration_ms = (time.perf_counter() - start_time) * 1000
@@ -360,9 +489,10 @@ class UserRepository:
             updated = (res.data[0] if res and res.data else await self.get_by_id(user_id))
             if updated and "password" in updated:
                 updated.pop("password", None)
+            decrypted = await self._decrypt_user_row(updated)
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info("CLAIM user completed: user_id=%s in %.2fms", user_id, duration_ms)
-            return updated
+            return decrypted
         except Exception as e:
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.error("Database error in claim_unverified_account_with_google user_id=%s after %.2fms: %s", user_id, duration_ms, e, exc_info=True)
@@ -385,10 +515,15 @@ class UserRepository:
                 if new_email != current_email:
                     updates["email_verified_at"] = None
 
+            dek = await self.key_vault.get_user_dek_or_none(user_id, self.db)
+            if not dek:
+                dek = await self.key_vault.provision_user_dek(user_id, self.db)
+
+            to_encrypt = {}
             if req.country_code is not None:
-                updates["country_code"] = req.country_code
+                to_encrypt["country_code"] = req.country_code
             if req.mobile_number is not None:
-                updates["mobile_number"] = req.mobile_number
+                to_encrypt["mobile_number"] = req.mobile_number
 
             if current and (req.country_code is not None or req.mobile_number is not None):
                 curr_code = current.get("country_code")
@@ -401,12 +536,16 @@ class UserRepository:
             if req.avatar_image_path is not None:
                 updates["avatar_image_path"] = req.avatar_image_path
             if req.custom_categories is not None:
-                updates["custom_categories"] = [
+                to_encrypt["custom_categories"] = [
                     c.model_dump(by_alias=True) if hasattr(c, "model_dump") else c
                     for c in req.custom_categories
                 ]
             if req.preferences is not None:
-                updates["preferences"] = req.preferences
+                to_encrypt["preferences"] = req.preferences
+
+            if to_encrypt:
+                enc_fields, _ = self._encrypt_user_fields(to_encrypt, dek)
+                updates.update(enc_fields)
 
             if not updates:
                 logger.debug("No fields provided to update_profile for user_id=%s; fetching profile", user_id)
@@ -425,9 +564,10 @@ class UserRepository:
                 return None
             user_data = res.data[0]
             user_data.pop("password", None)
+            decrypted = await self._decrypt_user_row(user_data)
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info("UPDATE user profile succeeded for user_id=%s in %.2fms", user_id, duration_ms)
-            return user_data
+            return decrypted
         except Exception as e:
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.error("Database error in UPDATE user profile user_id=%s after %.2fms: %s", user_id, duration_ms, e, exc_info=True)
@@ -504,7 +644,7 @@ class UserRepository:
             result = res.data if res else None
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info("SELECT user get_by_id_with_password finished: found=%s in %.2fms", result is not None, duration_ms)
-            return result
+            return await self._decrypt_user_row(result)
         except Exception as e:
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.error("Database error in SELECT user get_by_id_with_password user_id=%s after %.2fms: %s", user_id, duration_ms, e, exc_info=True)
@@ -522,7 +662,14 @@ class UserRepository:
         try:
             updates: dict = {"password": new_password_hash}
             if updated_preferences is not None:
-                updates["preferences"] = updated_preferences
+                dek = await self.key_vault.get_user_dek_or_none(user_id, self.db)
+                if not dek:
+                    dek = await self.key_vault.provision_user_dek(user_id, self.db)
+                if dek:
+                    updates["preferences"] = self.crypto.encrypt_json_with_dek(updated_preferences, dek)
+                    updates["enc_version"] = 1
+                else:
+                    updates["preferences"] = self.crypto.encrypt_json(updated_preferences)
 
             res = await (
                 self.db.table(self.TABLE)
@@ -588,9 +735,10 @@ class UserRepository:
                 return None
             user_data = res.data[0]
             user_data.pop("password", None)
+            decrypted = await self._decrypt_user_row(user_data)
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info("set_email_verified succeeded for user_id=%s in %.2fms", user_id, duration_ms)
-            return user_data
+            return decrypted
         except Exception as e:
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.error("Database error in set_email_verified user_id=%s after %.2fms: %s", user_id, duration_ms, e, exc_info=True)
@@ -734,15 +882,23 @@ class UserRepository:
         prefs["trial_start_at"] = past_15_days
         prefs["is_in_trial"] = True
 
+        dek = await self.key_vault.get_user_dek_or_none(user_id, self.db)
+        if not dek:
+            dek = await self.key_vault.provision_user_dek(user_id, self.db)
+        enc_prefs = self.crypto.encrypt_json_with_dek(prefs, dek) if dek else self.crypto.encrypt_json(prefs)
+
         # Update user with past trial start time
         now_iso = datetime.now(timezone.utc).isoformat()
+        payload = {
+            "preferences": enc_prefs,
+            "tier": "premium",
+            "updated_at": now_iso,
+        }
+        if dek:
+            payload["enc_version"] = 1
         await (
             self.db.table(self.TABLE)
-            .update({
-                "preferences": prefs,
-                "tier": "premium",
-                "updated_at": now_iso,
-            })
+            .update(payload)
             .eq("id", user_id)
             .execute()
         )
@@ -762,7 +918,7 @@ class UserRepository:
             if not user:
                 return None
 
-            prefs = user.get("preferences") or {}
+            prefs = dict(user.get("preferences") or {})
             prefs["trial_start_at"] = iso_ts
             prefs["is_in_trial"] = True
             if device_id:
@@ -770,13 +926,22 @@ class UserRepository:
                 prefs["trial_device_id"] = clean_dev
                 await self.mark_device_trial_consumed(clean_dev)
 
+            dek = await self.key_vault.get_user_dek_or_none(user_id, self.db)
+            if not dek:
+                dek = await self.key_vault.provision_user_dek(user_id, self.db)
+            enc_prefs = self.crypto.encrypt_json_with_dek(prefs, dek) if dek else self.crypto.encrypt_json(prefs)
+
+            payload = {
+                "tier": "premium",
+                "preferences": enc_prefs,
+                "updated_at": iso_ts,
+            }
+            if dek:
+                payload["enc_version"] = 1
+
             res = await (
                 self.db.table(self.TABLE)
-                .update({
-                    "tier": "premium",
-                    "preferences": prefs,
-                    "updated_at": iso_ts,
-                })
+                .update(payload)
                 .eq("id", user_id)
                 .is_("deleted_at", "null")
                 .execute()
@@ -785,12 +950,95 @@ class UserRepository:
                 return None
             user_data = res.data[0]
             user_data.pop("password", None)
+            decrypted = await self._decrypt_user_row(user_data)
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info("Reverse trial granted (14 days) for user_id=%s in %.2fms", user_id, duration_ms)
-            return user_data
+            return decrypted
         except Exception as e:
             logger.error("Failed to set trial start for user_id=%s: %s", user_id, e, exc_info=True)
             raise
+
+    async def grant_free_trial(self, user_id: str, device_id: str | None = None) -> dict | None:
+        """Grant free reverse trial to user (alias for set_trial_start)."""
+        return await self.set_trial_start(user_id, device_id=device_id)
+
+    async def consume_device_trial_in_preferences(self, user_id: str, device_id: str) -> dict | None:
+        """Record device trial consumption in user preferences."""
+        user = await self.get_by_id(user_id)
+        if not user:
+            return None
+        prefs = dict(user.get("preferences") or {})
+        clean_dev = device_id.strip()
+        prefs["trial_device_id"] = clean_dev
+        prefs["trial_consumed"] = True
+
+        dek = await self.key_vault.get_user_dek_or_none(user_id, self.db)
+        if not dek:
+            dek = await self.key_vault.provision_user_dek(user_id, self.db)
+        enc_prefs = self.crypto.encrypt_json_with_dek(prefs, dek) if dek else self.crypto.encrypt_json(prefs)
+
+        payload = {"preferences": enc_prefs, "updated_at": datetime.now(timezone.utc).isoformat()}
+        if dek:
+            payload["enc_version"] = 1
+
+        res = await self.db.table(self.TABLE).update(payload).eq("id", user_id).is_("deleted_at", "null").execute()
+        if not res.data:
+            return None
+        user_data = res.data[0]
+        user_data.pop("password", None)
+        return await self._decrypt_user_row(user_data)
+
+    async def record_email_verification_trial_consumed(self, user_id: str, email: str | None = None) -> dict | None:
+        """Record trial consumption upon email verification in user preferences."""
+        user = await self.get_by_id(user_id)
+        if not user:
+            return None
+        prefs = dict(user.get("preferences") or {})
+        prefs["email_trial_consumed"] = True
+        prefs["trial_granted"] = True
+        prefs.pop("trial_pending_verification", None)
+
+        dek = await self.key_vault.get_user_dek_or_none(user_id, self.db)
+        if not dek:
+            dek = await self.key_vault.provision_user_dek(user_id, self.db)
+        enc_prefs = self.crypto.encrypt_json_with_dek(prefs, dek) if dek else self.crypto.encrypt_json(prefs)
+
+        payload = {"preferences": enc_prefs, "updated_at": datetime.now(timezone.utc).isoformat()}
+        if dek:
+            payload["enc_version"] = 1
+
+        res = await self.db.table(self.TABLE).update(payload).eq("id", user_id).is_("deleted_at", "null").execute()
+        if not res.data:
+            return None
+        user_data = res.data[0]
+        user_data.pop("password", None)
+        return await self._decrypt_user_row(user_data)
+
+    async def record_trial_device_ineligible(self, user_id: str, reason: str = "device_or_email_already_used") -> dict | None:
+        """Mark user preferences as ineligible for trial."""
+        user = await self.get_by_id(user_id)
+        if not user:
+            return None
+        prefs = dict(user.get("preferences") or {})
+        prefs["trial_pending_verification"] = False
+        prefs["trial_ineligible"] = True
+        prefs["trial_ineligible_reason"] = reason
+
+        dek = await self.key_vault.get_user_dek_or_none(user_id, self.db)
+        if not dek:
+            dek = await self.key_vault.provision_user_dek(user_id, self.db)
+        enc_prefs = self.crypto.encrypt_json_with_dek(prefs, dek) if dek else self.crypto.encrypt_json(prefs)
+
+        payload = {"preferences": enc_prefs, "updated_at": datetime.now(timezone.utc).isoformat()}
+        if dek:
+            payload["enc_version"] = 1
+
+        res = await self.db.table(self.TABLE).update(payload).eq("id", user_id).is_("deleted_at", "null").execute()
+        if not res.data:
+            return None
+        user_data = res.data[0]
+        user_data.pop("password", None)
+        return await self._decrypt_user_row(user_data)
 
     async def evaluate_and_apply_deferred_trial(self, user_id: str, email: str, user_data: dict) -> dict:
         """Evaluate trial eligibility upon email verification and either grant reverse trial or mark ineligible."""
@@ -806,10 +1054,14 @@ class UserRepository:
             logger.info("evaluate_and_apply_deferred_trial: Granting 14-day trial for user_id=%s", user_id)
             updated = await self.set_trial_start(user_id, device_id=device_id)
             if updated:
-                prefs2 = updated.get("preferences") or {}
+                prefs2 = dict(updated.get("preferences") or {})
                 prefs2.pop("trial_pending_verification", None)
                 prefs2["trial_granted"] = True
-                await self.db.table(self.TABLE).update({"preferences": prefs2, "tier": "premium"}).eq("id", user_id).execute()
+                dek = await self.key_vault.get_user_dek_or_none(user_id, self.db)
+                if not dek:
+                    dek = await self.key_vault.provision_user_dek(user_id, self.db)
+                enc_prefs2 = self.crypto.encrypt_json_with_dek(prefs2, dek) if dek else self.crypto.encrypt_json(prefs2)
+                await self.db.table(self.TABLE).update({"preferences": enc_prefs2, "tier": "premium"}).eq("id", user_id).execute()
                 return await self.get_by_id(user_id) or updated
             return user_data
 
@@ -818,7 +1070,11 @@ class UserRepository:
         prefs_fail["trial_pending_verification"] = False
         prefs_fail["trial_ineligible"] = True
         prefs_fail["trial_ineligible_reason"] = "device_or_email_already_used"
-        await self.db.table(self.TABLE).update({"preferences": prefs_fail, "tier": "free"}).eq("id", user_id).execute()
+        dek = await self.key_vault.get_user_dek_or_none(user_id, self.db)
+        if not dek:
+            dek = await self.key_vault.provision_user_dek(user_id, self.db)
+        enc_prefs_fail = self.crypto.encrypt_json_with_dek(prefs_fail, dek) if dek else self.crypto.encrypt_json(prefs_fail)
+        await self.db.table(self.TABLE).update({"preferences": enc_prefs_fail, "tier": "free"}).eq("id", user_id).execute()
         return await self.get_by_id(user_id) or user_data
 
     async def set_tier(self, user_id: str, tier: str, updated_preferences: dict | None = None) -> dict | None:
@@ -831,7 +1087,7 @@ class UserRepository:
             if not user:
                 return None
 
-            prefs = user.get("preferences") or {}
+            prefs = dict(user.get("preferences") or {})
             if updated_preferences:
                 prefs.update(updated_preferences)
 
@@ -842,13 +1098,23 @@ class UserRepository:
             else:
                 prefs["is_in_trial"] = False
 
+            dek = await self.key_vault.get_user_dek_or_none(user_id, self.db)
+            if not dek:
+                dek = await self.key_vault.provision_user_dek(user_id, self.db)
+
+            enc_prefs = self.crypto.encrypt_json_with_dek(prefs, dek) if dek else self.crypto.encrypt_json(prefs)
+
+            payload = {
+                "tier": clean_tier,
+                "preferences": enc_prefs,
+                "updated_at": now,
+            }
+            if dek:
+                payload["enc_version"] = 1
+
             res = await (
                 self.db.table(self.TABLE)
-                .update({
-                    "tier": clean_tier,
-                    "preferences": prefs,
-                    "updated_at": now,
-                })
+                .update(payload)
                 .eq("id", user_id)
                 .is_("deleted_at", "null")
                 .execute()
@@ -857,9 +1123,10 @@ class UserRepository:
                 return None
             user_data = res.data[0]
             user_data.pop("password", None)
+            decrypted = await self._decrypt_user_row(user_data)
             duration_ms = (time.perf_counter() - start_time) * 1000
             logger.info("Updated tier to '%s' for user_id=%s in %.2fms", clean_tier, user_id, duration_ms)
-            return user_data
+            return decrypted
         except Exception as e:
             logger.error("Failed to set tier for user_id=%s: %s", user_id, e, exc_info=True)
             raise
@@ -874,7 +1141,7 @@ class UserRepository:
             if not user:
                 return None
 
-            prefs = user.get("preferences") or {}
+            prefs = dict(user.get("preferences") or {})
             # Guard: User must have had a trial, must not be trial ineligible, and must not have already claimed discount
             if not prefs.get("trial_start_at") or prefs.get("trial_ineligible", False) or prefs.get("discount_offer_claimed", False):
                 logger.info("Skipping discount offer for ineligible user_id=%s", user_id)
@@ -882,9 +1149,14 @@ class UserRepository:
 
             if not prefs.get("discount_offer_shown_at"):
                 prefs["discount_offer_shown_at"] = now.isoformat()
+                dek = await self.key_vault.get_user_dek_or_none(user_id, self.db)
+                if not dek:
+                    dek = await self.key_vault.provision_user_dek(user_id, self.db)
+                enc_prefs = self.crypto.encrypt_json_with_dek(prefs, dek) if dek else self.crypto.encrypt_json(prefs)
+
                 res = await (
                     self.db.table(self.TABLE)
-                    .update({"preferences": prefs, "updated_at": now.isoformat()})
+                    .update({"preferences": enc_prefs, "updated_at": now.isoformat()})
                     .eq("id", user_id)
                     .is_("deleted_at", "null")
                     .execute()
@@ -892,7 +1164,7 @@ class UserRepository:
                 if res.data:
                     user_data = res.data[0]
                     user_data.pop("password", None)
-                    return user_data
+                    return await self._decrypt_user_row(user_data)
             return user
         except Exception as e:
             logger.warning("Failed to record discount_offer_shown_at for user_id=%s: %s", user_id, e)
@@ -907,7 +1179,7 @@ class UserRepository:
             if not user:
                 return False, 0, "User not found"
 
-            prefs = user.get("preferences") or {}
+            prefs = dict(user.get("preferences") or {})
             saved_date = prefs.get("ad_scans_date")
             ad_scans_today = prefs.get("ad_scans_today", 0)
 
@@ -921,9 +1193,14 @@ class UserRepository:
             prefs["ad_scans_today"] = ad_scans_today
             prefs["ad_scans_date"] = today_str
 
+            dek = await self.key_vault.get_user_dek_or_none(user_id, self.db)
+            if not dek:
+                dek = await self.key_vault.provision_user_dek(user_id, self.db)
+            enc_prefs = self.crypto.encrypt_json_with_dek(prefs, dek) if dek else self.crypto.encrypt_json(prefs)
+
             await (
                 self.db.table(self.TABLE)
-                .update({"preferences": prefs, "updated_at": now.isoformat()})
+                .update({"preferences": enc_prefs, "updated_at": now.isoformat()})
                 .eq("id", user_id)
                 .is_("deleted_at", "null")
                 .execute()
@@ -993,7 +1270,7 @@ class UserRepository:
     async def check_and_apply_trial_expiration(self, user: dict) -> dict:
         """Evaluate whether a user's 14-day reverse trial has expired, and downgrade if so."""
         tier = (user.get("tier") or "free").lower()
-        prefs = user.get("preferences") or {}
+        prefs = dict(user.get("preferences") or {})
         if tier != "premium" or not prefs.get("is_in_trial"):
             return user
 
@@ -1006,27 +1283,33 @@ class UserRepository:
             now = datetime.now(timezone.utc)
             if now - trial_start > timedelta(days=14):
                 # 14-day trial expired! Downgrade to free tier
-                logger.info("Trial expired for user_id=%s (started %s). Downgrading to Free.", user["id"], trial_start_str)
+                user_id = str(user.get("id") or "")
+                logger.info("Trial expired for user_id=%s (started %s). Downgrading to Free.", user_id, trial_start_str)
                 prefs["is_in_trial"] = False
                 prefs["trial_expired_at"] = now.isoformat()
                 if not prefs.get("discount_offer_shown_at"):
                     prefs["discount_offer_shown_at"] = now.isoformat()
 
+                dek = await self.key_vault.get_user_dek_or_none(user_id, self.db)
+                if not dek:
+                    dek = await self.key_vault.provision_user_dek(user_id, self.db)
+                enc_prefs = self.crypto.encrypt_json_with_dek(prefs, dek) if dek else self.crypto.encrypt_json(prefs)
+
                 res = await (
                     self.db.table(self.TABLE)
                     .update({
                         "tier": "free",
-                        "preferences": prefs,
+                        "preferences": enc_prefs,
                         "updated_at": now.isoformat(),
                     })
-                    .eq("id", user["id"])
+                    .eq("id", user_id)
                     .is_("deleted_at", "null")
                     .execute()
                 )
                 if res.data:
                     updated = res.data[0]
                     updated.pop("password", None)
-                    return updated
+                    return await self._decrypt_user_row(updated)
         except Exception as e:
             logger.warning("Failed evaluating trial expiration for user_id=%s: %s", user.get("id"), e)
 

@@ -7,7 +7,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_users_active_username ON users (LOWER(user
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_active_email ON users (LOWER(email)) WHERE deleted_at IS NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_active_google_id ON users (google_id) WHERE deleted_at IS NULL AND google_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_users_email_verified ON users (email_verified_at) WHERE deleted_at IS NULL;
-CREATE INDEX IF NOT EXISTS idx_users_mobile ON users (mobile_number) WHERE deleted_at IS NULL AND mobile_number IS NOT NULL;
+DROP INDEX IF EXISTS idx_users_mobile;
+CREATE INDEX IF NOT EXISTS idx_users_mobile_hash ON users (mobile_hash) 
+WHERE deleted_at IS NULL AND mobile_hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_users_2fa_enabled ON users (id) WHERE is_2fa_enabled IS TRUE;
 
 -- Devices

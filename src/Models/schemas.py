@@ -36,6 +36,7 @@ class Receipt(BaseModel):
     raw_text: str = ""
     confidence_score: float = 0.0
     notes: str | None = None
+    currency_rate_at_receipt_date: float | None = None
 
     @field_validator("merchant_name", mode="before")
     @classmethod

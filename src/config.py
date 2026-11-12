@@ -1,6 +1,6 @@
 from functools import lru_cache
 import hashlib
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -91,7 +91,7 @@ class Settings(BaseSettings):
     # Togglable Logging Configuration
     enable_file_logging: bool = True
     log_file_path: str = "app.log"
-    log_level: str = "DEBUG"
+    log_level: str = "INFO"  # Hardened production default
     enable_console_logging: bool = True
 
     # Data Encryption at Rest (AES-256-GCM)
@@ -137,6 +137,21 @@ class Settings(BaseSettings):
         if not self.gemini_api_key and self.openrouter_api_key:
             return "openrouter"
         return "gemini"
+
+    @model_validator(mode="after")
+    def enforce_production_log_level(self) -> "Settings":
+        """Hardens logging configuration against accidental DEBUG leakage in production."""
+        env = (self.environment or "development").lower().strip()
+        lvl = (self.log_level or "INFO").upper().strip()
+
+        if env in ("production", "staging"):
+            if lvl == "DEBUG":
+                # Demote DEBUG to INFO in non-development environments
+                object.__setattr__(self, "log_level", "INFO")
+        elif not self.log_level:
+            object.__setattr__(self, "log_level", "DEBUG" if env == "development" else "INFO")
+
+        return self
 
 
 @lru_cache

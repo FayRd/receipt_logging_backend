@@ -1,4 +1,5 @@
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 import jwt
@@ -36,11 +37,12 @@ def create_access_token(user_id: str, username: str, expires_delta: timedelta | 
         "sub": user_id,
         "username": username,
         "type": "access",
+        "jti": uuid.uuid4().hex,
         "iat": datetime.now(timezone.utc),
         "exp": expire,
     }
     encoded_jwt = jwt.encode(payload, secret, algorithm=algorithm)
-    logger.debug("Issued JWT access token for user_id=%s, expires=%s", user_id, expire.isoformat())
+    logger.debug("Issued JWT access token for user_id=%s, jti=%s, expires=%s", user_id, payload["jti"], expire.isoformat())
     return encoded_jwt
 
 
@@ -60,11 +62,12 @@ def create_refresh_token(user_id: str, username: str, expires_delta: timedelta |
         "sub": user_id,
         "username": username,
         "type": "refresh",
+        "jti": uuid.uuid4().hex,
         "iat": datetime.now(timezone.utc),
         "exp": expire,
     }
     encoded_jwt = jwt.encode(payload, secret, algorithm=algorithm)
-    logger.debug("Issued JWT refresh token for user_id=%s, expires=%s", user_id, expire.isoformat())
+    logger.debug("Issued JWT refresh token for user_id=%s, jti=%s, expires=%s", user_id, payload["jti"], expire.isoformat())
     return encoded_jwt
 
 
@@ -79,11 +82,12 @@ def create_2fa_temp_token(user_id: str, username: str) -> str:
         "sub": user_id,
         "username": username,
         "type": "2fa_challenge",
+        "jti": uuid.uuid4().hex,
         "iat": datetime.now(timezone.utc),
         "exp": expire,
     }
     encoded_jwt = jwt.encode(payload, secret, algorithm=algorithm)
-    logger.debug("Issued JWT 2fa_challenge token for user_id=%s, expires=%s", user_id, expire.isoformat())
+    logger.debug("Issued JWT 2fa_challenge token for user_id=%s, jti=%s, expires=%s", user_id, payload["jti"], expire.isoformat())
     return encoded_jwt
 
 
@@ -125,3 +129,29 @@ def verify_jwt_token(token: str, expected_type: str = "access") -> dict[str, Any
             detail="Invalid authentication token credentials.",
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+
+async def verify_jwt_token_async(
+    token: str,
+    expected_type: str = "access",
+    check_denylist: bool = True,
+) -> dict[str, Any]:
+    """Verify signature, claims, and active revocation denylist status."""
+    payload = verify_jwt_token(token, expected_type=expected_type)
+
+    if check_denylist:
+        user_id = payload.get("sub")
+        jti = payload.get("jti")
+        from src.Services.token_denylist_service import get_token_denylist_service
+        denylist_service = get_token_denylist_service()
+
+        if await denylist_service.is_revoked(jti=jti, user_id=user_id):
+            logger.warning("Rejected revoked JWT token: user_id=%s, jti=%s", user_id, jti)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication token has been revoked. Please sign in again.",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+    return payload
+

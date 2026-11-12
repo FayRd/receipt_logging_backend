@@ -5,13 +5,14 @@ import re
 import secrets
 from datetime import datetime, timezone
 import httpx
+import jwt
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 from supabase import AsyncClient
 from src.Infrastructure.database import get_supabase_client
 from src.Auth.identity import Identity, get_user_identity, get_scoped_identity
 from src.Auth.rate_limiter import rate_limit
 from src.Auth.google_auth import verify_google_id_token
-from src.Infrastructure.logger import get_logger
+from src.Infrastructure.logger import get_logger, mask_email, mask_identifier
 from src.Models.schemas import (
     UserCreateRequest,
     UserLoginRequest,
@@ -44,7 +45,9 @@ from src.Auth.jwt_token import (
     create_refresh_token,
     create_2fa_temp_token,
     verify_jwt_token,
+    verify_jwt_token_async,
 )
+from src.Services.token_denylist_service import get_token_denylist_service
 from src.Infrastructure.redis_service import (
     is_contact_change_cooldown_active,
     set_contact_change_cooldown,
@@ -111,13 +114,13 @@ async def create_user(
 
     This is an unauthenticated public endpoint — rate limited to protect against registration spam.
     """
-    logger.debug("Entering create_user: username=%s, email=%s", body.username, body.email)
+    logger.debug("AUDIT: Entering create_user: username=%s, email_masked=%s", body.username, mask_email(body.email))
     if await repo.get_by_username(body.username):
         logger.warning("Registration failed: Username '%s' already taken", body.username)
         raise HTTPException(status_code=409, detail="Username already taken.")
 
     if await repo.get_by_email(body.email):
-        logger.warning("Registration failed: An account with email '%s' already exists", body.email)
+        logger.warning("AUDIT: Registration failed: An account with email '%s' already exists", mask_email(body.email))
         raise HTTPException(status_code=409, detail="An account with this email already exists.")
 
     user = await repo.create(body)
@@ -191,11 +194,11 @@ async def login_user(
     If 2FA is enabled, triggers an OTP challenge to the registered email and returns requires_2fa=True.
     Rate limited to protect against brute-force password guessing attacks.
     """
-    logger.debug("Entering login_user: identifier=%s", body.username)
+    logger.debug("AUDIT: Entering login_user: identifier_masked=%s", mask_identifier(body.username))
     user = await repo.get_by_identifier(body.username)
     # Identical error for missing user AND wrong password — prevents username enumeration
     if not user:
-        logger.warning("Login failed for identifier '%s': account not found", body.username)
+        logger.warning("AUDIT: Login failed for identifier '%s': account not found", mask_identifier(body.username))
         raise HTTPException(status_code=401, detail="Invalid username or password.")
 
     incoming_hash = repo.hash_password(body.password)
@@ -503,7 +506,7 @@ async def google_auth(
     if user_by_email:
         # Check if already verified
         if user_by_email.get("email_verified_at") is not None:
-            logger.warning("google_auth: conflict - email '%s' already verified with account id=%s", email, user_by_email.get("id"))
+            logger.warning("AUDIT: google_auth conflict - email '%s' already verified with account id=%s", mask_email(email), user_by_email.get("id"))
             raise HTTPException(status_code=409, detail="Email already in use.")
 
         # Unverified account claim (OWASP Pre-Account Takeover Defense)
@@ -599,6 +602,11 @@ async def google_auth(
     response_model=TokenRefreshResponse,
     dependencies=[Depends(rate_limit(lambda s: s.rate_limit_auth_per_minute))],
 )
+@router.post(
+    "/token/refresh",
+    response_model=TokenRefreshResponse,
+    dependencies=[Depends(rate_limit(lambda s: s.rate_limit_auth_per_minute))],
+)
 async def refresh_user_token(
     body: TokenRefreshRequest,
     repo: UserRepository = Depends(get_repo),
@@ -606,12 +614,15 @@ async def refresh_user_token(
     """Rotate JWT session tokens using a valid refresh token.
 
     Validates signature, expiration, and token type.
+    Revokes the consumed refresh token to prevent replay attacks (single-use rotation).
     Issues a new access token and rotated refresh token.
     """
     logger.debug("Entering refresh_user_token")
-    payload = verify_jwt_token(body.refresh_token, expected_type="refresh")
+    payload = await verify_jwt_token_async(body.refresh_token, expected_type="refresh")
     user_id = payload.get("sub")
     username = payload.get("username", "")
+    old_jti = payload.get("jti")
+    old_exp = payload.get("exp")
 
     user = await repo.get_by_id(user_id)
     if not user:
@@ -620,6 +631,16 @@ async def refresh_user_token(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="User account not found or session terminated.",
             headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    # Immediately revoke consumed refresh token to enforce single-use rotation (OWASP)
+    if old_jti and old_exp:
+        denylist = get_token_denylist_service()
+        await denylist.revoke_token(
+            jti=old_jti,
+            exp=old_exp,
+            user_id=user_id,
+            reason="token_refreshed",
         )
 
     # Issue fresh rotated tokens
@@ -1077,11 +1098,26 @@ async def delete_my_profile(
         )
     _verify_2fa_for_action(user, request)
 
+    # Extract calling JTI and EXP from caller's Bearer token for pinpoint revocation
+    calling_jti = None
+    calling_exp = None
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.strip().lower().startswith("bearer "):
+        try:
+            token = auth_header.strip()[7:].strip()
+            decoded = jwt.decode(token, options={"verify_signature": False})
+            calling_jti = decoded.get("jti")
+            calling_exp = decoded.get("exp")
+        except Exception:
+            pass
+
     await execute_account_deletion(
         user_id=str(identity.user_id),
         user_row=user,
         db=db,
         background_tasks=background_tasks,
+        active_jti=calling_jti,
+        active_exp=calling_exp,
     )
 
     return {

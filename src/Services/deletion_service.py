@@ -12,6 +12,7 @@ from src.config import get_settings
 from src.Services.storage_scrubber import scrub_pending_storage_deletions
 from src.Services.backup_scrubber import scrub_user_from_all_backups
 from src.Services.r2_scrubber import purge_user_r2_backups
+from src.Services.token_denylist_service import get_token_denylist_service
 
 logger = get_logger("Services.deletion_service")
 _settings = get_settings()
@@ -55,9 +56,12 @@ async def execute_account_deletion(
     user_row: dict,
     db: AsyncClient,
     background_tasks: BackgroundTasks,
+    active_jti: str | None = None,
+    active_exp: float | int | None = None,
 ) -> dict:
-    """Execute the full 10-step account deletion cascade.
+    """Execute the full 10-step account deletion cascade, including active token denylisting.
 
+    0. Immediately revokes user tokens in TokenDenylistService (Apple App Store 5.1.1(v) & OWASP).
     1. Writes start record to deletion_audit_log (status='pending').
     2. Destroys per-user DEK in user_keys (crypto-shredding enc_version=1 data).
     3. Hard-deletes legacy enc_version=0 receipts and conversations.
@@ -70,6 +74,14 @@ async def execute_account_deletion(
     Returns dict with rows_hard_deleted, rows_crypto_shredded.
     """
     logger.debug("Executing account deletion cascade for user_id=%s", user_id)
+
+    # 0. Immediate Active JWT Revocation (OWASP & Apple App Store 5.1.1(v) Compliance)
+    denylist = get_token_denylist_service()
+    await denylist.revoke_user(user_id=user_id, reason="account_deleted")
+    if active_jti and active_exp:
+        await denylist.revoke_token(jti=active_jti, exp=active_exp, user_id=user_id, reason="account_deleted")
+    logger.info("Successfully revoked active JWT tokens and user ID %s in denylist", user_id)
+
     username = user_row.get("username")
     raw_email = str(user_row.get("email") or "").strip().lower()
     email_hash = hashlib.sha256(raw_email.encode("utf-8")).hexdigest() if raw_email else None

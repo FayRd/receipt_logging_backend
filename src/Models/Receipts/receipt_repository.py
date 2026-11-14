@@ -77,10 +77,6 @@ class ReceiptRepository:
 
             response = await query.execute()
             rows = response.data if response else []
-            if receipt.currency_rate_at_receipt_date is None:
-                rate = await fetch_rate_for_date(receipt.currency, receipt.date)
-                if rate is not None:
-                    receipt.currency_rate_at_receipt_date = rate
 
             dek: bytes | None = None
             if identity.user_id:

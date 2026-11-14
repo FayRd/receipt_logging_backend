@@ -8,7 +8,7 @@ from postgrest.exceptions import APIError
 from supabase import AsyncClient
 from src.Infrastructure.crypto import get_crypto_engine, compute_mobile_hash
 from src.Infrastructure.key_vault import get_key_vault
-from src.Infrastructure.logger import get_logger
+from src.Infrastructure.logger import get_logger, mask_email, mask_identifier, hash_audit_id
 from src.Models.schemas import UserCreateRequest, UserUpdateRequest
 from src.config import get_settings
 
@@ -193,7 +193,7 @@ class UserRepository:
         """Fetch a raw user row (including password hash) by email (case-insensitive)."""
         start_time = time.perf_counter()
         clean_email = email.strip().lower()
-        logger.debug("SELECT user get_by_email: email='%s'", clean_email)
+        logger.debug("SELECT user get_by_email: email_hash=%s", hash_audit_id(clean_email))
         try:
             res = await (
                 self.db.table(self.TABLE)
@@ -223,12 +223,12 @@ class UserRepository:
             return await self._decrypt_user_row(result)
         except Exception as e:
             duration_ms = (time.perf_counter() - start_time) * 1000
-            logger.error("Database error in SELECT user get_by_email '%s' after %.2fms: %s", clean_email, duration_ms, e, exc_info=True)
+            logger.error("Database error in SELECT user get_by_email [%s] after %.2fms: %s", mask_email(clean_email), duration_ms, e, exc_info=True)
             raise
 
     async def get_by_identifier(self, identifier: str) -> dict | None:
         """Fetch a raw user row by username or email (case-insensitive)."""
-        logger.debug("SELECT user get_by_identifier: identifier='%s'", identifier)
+        logger.debug("SELECT user get_by_identifier: identifier_masked=%s", mask_identifier(identifier))
         user = await self.get_by_username(identifier)
         if user:
             return user
@@ -238,7 +238,7 @@ class UserRepository:
         """Fetch user row by username, email, or mobile_number (case-insensitive)."""
         start_time = time.perf_counter()
         clean = identifier.strip()
-        logger.debug("SELECT user get_by_email_or_mobile: clean_identifier='%s'", clean)
+        logger.debug("SELECT user get_by_email_or_mobile: identifier_masked=%s", mask_identifier(clean))
         try:
             user = await self.get_by_identifier(clean)
             if user:
@@ -328,7 +328,7 @@ class UserRepository:
     async def create(self, req: UserCreateRequest) -> dict:
         """Hash password and insert a new user row with automatic 14-day Premium reverse trial. Returns sanitized record."""
         start_time = time.perf_counter()
-        logger.debug("INSERT user create: username='%s', email='%s'", req.username, req.email)
+        logger.debug("INSERT user create: username='%s', email_masked='%s'", req.username, mask_email(req.email))
         try:
             hashed_pwd = self.hash_password(req.password)
             cats = [c.model_dump(by_alias=True) if hasattr(c, "model_dump") else c for c in req.custom_categories] if req.custom_categories else []
@@ -403,7 +403,7 @@ class UserRepository:
     ) -> dict:
         """Insert a new user authenticated via Google OAuth with email_verified_at set and password null."""
         start_time = time.perf_counter()
-        logger.debug("INSERT google user create: username='%s', email='%s', google_id='%s'", username, email, google_id)
+        logger.debug("INSERT google user create: username='%s', email_masked='%s', google_id='%s'", username, mask_email(email), google_id)
         try:
             prefs = dict(preferences) if preferences is not None else {}
             device_id = prefs.get("trial_device_id")
@@ -720,7 +720,7 @@ class UserRepository:
         start_time = time.perf_counter()
         clean_email = email.strip().lower()
         iso_ts = verified_at.isoformat()
-        logger.debug("UPDATE set_email_verified: user_id=%s, email=%s", user_id, clean_email)
+        logger.debug("UPDATE set_email_verified: user_id=%s, email_masked=%s", user_id, mask_email(clean_email))
         try:
             res = await (
                 self.db.table(self.TABLE)
@@ -827,20 +827,20 @@ class UserRepository:
                 prefs = row.get("preferences") or {}
                 if tier in ("premium", "dev") or prefs.get("trial_start_at") is not None or prefs.get("is_in_trial"):
                     logger.info(
-                        "check_email_trial_or_purchase_used: matched previous trial/purchase for email=%s in user_id=%s",
-                        clean_email, row.get("id")
+                        "check_email_trial_or_purchase_used: matched previous trial/purchase for email_masked=%s in user_id=%s",
+                        mask_email(clean_email), row.get("id")
                     )
                     return True
                 sub = prefs.get("subscription") or {}
                 if sub.get("is_active"):
                     logger.info(
-                        "check_email_trial_or_purchase_used: matched active subscription for email=%s in user_id=%s",
-                        clean_email, row.get("id")
+                        "check_email_trial_or_purchase_used: matched active subscription for email_masked=%s in user_id=%s",
+                        mask_email(clean_email), row.get("id")
                     )
                     return True
             return False
         except Exception as e:
-            logger.warning("Error checking email trial/purchase history for email=%s: %s", clean_email, e)
+            logger.warning("Error checking email trial/purchase history for email_masked=%s: %s", mask_email(clean_email), e)
             return False
 
     async def mark_device_trial_consumed(self, device_id: str | None) -> None:

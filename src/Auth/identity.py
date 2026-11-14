@@ -7,7 +7,7 @@ from src.Infrastructure.logger import get_logger
 from src.Models.Devices.device_repository import DeviceRepository
 from src.Models.Users.user_repository import UserRepository
 from src.Auth.device_security import hash_device_token
-from src.Auth.jwt_token import verify_jwt_token
+from src.Auth.jwt_token import verify_jwt_token, verify_jwt_token_async
 
 logger = get_logger("Auth.identity")
 
@@ -132,7 +132,7 @@ async def get_user_identity(
     # 1. Primary: JWT Bearer Token validation
     if authorization and authorization.strip().lower().startswith("bearer "):
         bearer_token = authorization.strip()[7:].strip()
-        payload = verify_jwt_token(bearer_token, expected_type="access")
+        payload = await verify_jwt_token_async(bearer_token, expected_type="access")
         user_id = payload.get("sub")
         username = payload.get("username", "")
         identity = Identity(
@@ -255,7 +255,7 @@ async def require_link_bridge_identity(
     db_username = None
     if authorization and authorization.strip().lower().startswith("bearer "):
         bearer_token = authorization.strip()[7:].strip()
-        payload = verify_jwt_token(bearer_token, expected_type="access")
+        payload = await verify_jwt_token_async(bearer_token, expected_type="access")
         db_user_id = payload.get("sub")
         db_username = payload.get("username", "")
         logger.debug("Link bridge user identity resolved via JWT Bearer: user_id=%s, username=%s", db_user_id, db_username)
@@ -393,7 +393,7 @@ async def get_scoped_identity(
         # 1. Primary: JWT Bearer validation
         if authorization and authorization.strip().lower().startswith("bearer "):
             bearer_token = authorization.strip()[7:].strip()
-            payload = verify_jwt_token(bearer_token, expected_type="access")
+            payload = await verify_jwt_token_async(bearer_token, expected_type="access")
             user_id = payload.get("sub")
             username = payload.get("username", "")
             identity = Identity(
@@ -480,7 +480,7 @@ async def get_sse_identity(
         jwt_raw = access_token.strip()
 
     if jwt_raw:
-        payload = verify_jwt_token(jwt_raw, expected_type="access")
+        payload = await verify_jwt_token_async(jwt_raw, expected_type="access")
         user_id = payload.get("sub")
         username_val = payload.get("username", "")
         identity = Identity(

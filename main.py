@@ -9,7 +9,7 @@ from pydantic import ValidationError
 import redis.asyncio as aioredis
 from google import genai
 from src.config import get_settings, assert_production_keys
-from src.Infrastructure.logger import setup_logging, get_logger, set_request_id
+from src.Infrastructure.logger import setup_logging, get_logger, set_request_id, sanitize_text, sanitize_object
 from src.Infrastructure.database import get_supabase_client, close_supabase_client
 from src.API.v1 import health, scan, receipts, user, devices, chat, help, subscriptions
 from src.API.web import deletion as web_deletion
@@ -34,7 +34,27 @@ async def lifespan(app: FastAPI):
     assert_production_keys(settings)
 
     # Initialize Async Redis client
-    redis_client = aioredis.from_url(settings.redis_connection_string, decode_responses=True)
+    conn_str = (settings.redis_connection_string or "").strip()
+    if conn_str and (conn_str.startswith("redis://") or conn_str.startswith("rediss://")):
+        try:
+            redis_client = aioredis.from_url(conn_str, decode_responses=True, socket_connect_timeout=2)
+            await redis_client.ping()
+            logger.info("Redis connected successfully during startup")
+        except Exception as exc:
+            logger.warning(f"Failed to connect to Redis during startup: {exc}")
+            if settings.environment == "production":
+                logger.critical(
+                    "PRODUCTION READINESS FAILURE: Redis connectivity failed in production! "
+                    "Multi-worker Uvicorn clusters will operate on partitioned local memory denylists."
+                )
+    else:
+        if settings.environment == "production":
+            logger.critical(
+                "PRODUCTION READINESS FAILURE: Redis connection string is empty or invalid in production! "
+                "Multi-worker clusters cannot share token revocation state."
+            )
+        else:
+            logger.info("Redis not configured; in-memory fallback will be used for denylist and caching.")
 
     # Initialize Google Gen AI async client
     genai_client = genai.Client(api_key=settings.gemini_api_key)
@@ -93,7 +113,7 @@ async def request_trace_logging_middleware(request: Request, call_next):
     except Exception as exc:
         duration_ms = (time.perf_counter() - start_time) * 1000.0
         logger.error(
-            f"❌ EXCEPTION {request.method} {request.url.path} ({duration_ms:.2f}ms): {exc}\n{traceback.format_exc()}"
+            f"❌ EXCEPTION {request.method} {request.url.path} ({duration_ms:.2f}ms): {sanitize_text(str(exc))}\n{sanitize_text(traceback.format_exc())}"
         )
         raise exc
 
@@ -107,7 +127,7 @@ async def request_validation_exception_handler(request: Request, exc: RequestVal
         loc = " -> ".join([str(x) for x in err.get("loc", [])])
         formatted_errors.append({
             "field": loc,
-            "message": err.get("msg", "Invalid value"),
+            "message": sanitize_text(err.get("msg", "Invalid value")),
             "type": err.get("type", "value_error"),
         })
     logger.warning(
@@ -129,7 +149,7 @@ async def pydantic_validation_exception_handler(request: Request, exc: Validatio
         loc = " -> ".join([str(x) for x in err.get("loc", [])])
         formatted_errors.append({
             "field": loc,
-            "message": err.get("msg", "Invalid value"),
+            "message": sanitize_text(err.get("msg", "Invalid value")),
             "type": err.get("type", "value_error"),
         })
     logger.warning(
